@@ -1,74 +1,102 @@
 # Connection
 
-## Purpose
+An opaque, read-only handle that represents a live subscription. Every `Connect`, `Subscribe`, and `OnDestroy` call in CoreAPI returns a `Connection`. Calling `Disconnect` on it stops the subscription and releases resources.
 
-`Connection` represents a cancellable subscription or listener link. It tracks whether the link is active and provides a single method to sever it.
+---
 
-## Import
+## API Reference
+
+### `Connection.New(disconnectFn?)`
+
+Creates a new connection backed by an optional cleanup function. You rarely need to call this directly — it is used internally by Signal, Store, Context, etc.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `disconnectFn` | `(() -> ())?` | Called once when `Disconnect` is invoked. May be `nil`. |
+
+**Returns:** `Connection`
+
+**Errors:**
+- `Connection.New: disconnectFn must be a function or nil`
 
 ```luau
-local Connection = require(path.to.Connection)
+local conn = Connection.New(function()
+    print("Cleaned up!")
+end)
+conn:Disconnect()  -- prints "Cleaned up!"
+conn:Disconnect()  -- no-op; already disconnected
 ```
 
-## Public API reference
+---
+
+### `Connection.IsConnection(value)`
+
+Returns `true` if `value` is a live Connection handle (created by `Connection.New`).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `value` | `unknown` | Any value |
+
+**Returns:** `boolean`
 
 ```luau
-Connection.New(disconnectFn: (() -> ())?): Connection.Connection
-Connection.IsConnection(value: unknown): boolean
+local conn = Connection.New(nil)
+print(Connection.IsConnection(conn))  -- true
+print(Connection.IsConnection({}))    -- false
 ```
 
-## Types
+---
+
+### `handle.Connected`
+
+A read-only boolean property. `true` until `Disconnect` is called.
 
 ```luau
-export type Connection = {
-    Connected: boolean,
-    Disconnect: (self: Connection) -> (),
-}
+local conn = signal:Connect(fn)
+print(conn.Connected)  -- true
+conn:Disconnect()
+print(conn.Connected)  -- false
 ```
 
-## `Connection.New(disconnectFn?)`
+**Errors if written:**
+- `Connection: 'Connected' is read-only`
 
-Creates a new live connection.
+---
 
-**Parameters**
+### `handle:Disconnect()`
 
-- `disconnectFn` — optional cleanup function invoked once when `Disconnect` is called.
+Disconnects the subscription. Idempotent — safe to call multiple times.
 
-**Returns** a `Connection` handle.
+On the first call:
+1. Sets `Connected` to `false`.
+2. Calls `disconnectFn()` if one was provided, routing any error through `ErrorHandler.Protect`.
 
-**Behavior**
+Subsequent calls are no-ops.
 
-- The handle starts with `Connected = true`.
-- When `Disconnect` is called, `Connected` is set to `false` before `disconnectFn` runs, so the function cannot observe the connected state.
-- If `disconnectFn` errors, the error is routed through `ErrorHandler.Report` with phase `"Disconnect"`. `Connected` remains `false`.
-- Calling `Disconnect` on an already-disconnected connection is a no-op.
-
-**Error behavior**
-
-```text
-Connection.New: disconnectFn must be a function or nil
+```luau
+local conn = store:Subscribe(function(v) print(v) end)
+conn:Disconnect()
+conn:Disconnect()  -- safe; does nothing
 ```
 
-## `Connection.IsConnection(value)`
+---
 
-Returns `true` for any handle created by `Connection.New`, regardless of connected state.
+## Gotchas
 
-## `connection.Connected`
+- **Handles are weakly referenced.** The internal records table uses weak keys, so a Connection that has been garbage-collected no longer appears valid. Hold a reference to any Connection whose lifecycle you want to control explicitly.
+- **`disconnectFn` errors are routed, not rethrown.** If the cleanup function errors, the error passes through `ErrorHandler.Protect` (and thus the active policy) — `Disconnect` itself does not throw.
+- **`Connected` is the source of truth.** Do not rely on the absence of a reference to infer disconnection. Check `conn.Connected` explicitly.
 
-Read-only property. `true` while connected, `false` after `Disconnect`.
+```luau
+-- Pattern: store connections in a table and disconnect all on cleanup.
+local connections = {}
+table.insert(connections, signal:Connect(handler))
+table.insert(connections, store:Subscribe(listener))
 
-## `connection:Disconnect()`
-
-Severs the connection. Idempotent.
-
-## Lifecycle behavior
-
-Connections do not own external resources beyond the `disconnectFn` closure. They are garbage-collected when no references remain.
-
-## Nil behavior
-
-`disconnectFn` is optional. Passing `nil` creates a valid connection that does nothing on disconnect.
-
-## Not implemented
-
-Connection does not support reconnection or re-enabling after disconnect.
+local function cleanup()
+    for _, conn in connections do
+        conn:Disconnect()
+    end
+    table.clear(connections)
+end
+```

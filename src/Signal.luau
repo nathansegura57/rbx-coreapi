@@ -68,14 +68,6 @@ type SignalRecord = {
 
 local records: { [any]: SignalRecord } = setmetatable({}, { __mode = "k" } :: any)
 
-local function reportError(phase: string, err: unknown): ()
-	ErrorHandler.Report({
-		Module = "Signal",
-		Phase = phase,
-		Error = err,
-	})
-end
-
 local function trimReplayTime(record: SignalRecord): ()
 	local now = Scheduler.Now()
 	local window = record.ReplayTimeWindow
@@ -134,10 +126,7 @@ local function scheduleReplay(record: SignalRecord, entry: ListenerEntry): ()
 		local v = re.Value
 		Scheduler.Defer(function()
 			if entry.Connected then
-				local ok, err = pcall(entry.Fn, v)
-				if not ok then
-					reportError("Listener", err)
-				end
+				ErrorHandler.Protect(function() entry.Fn(v) end, "Signal", "Listener")
 			end
 		end)
 	end
@@ -204,7 +193,7 @@ function Signal.Never(): any
 end
 
 function Signal.After(seconds: number): any
-	if type(seconds) ~= "number" or seconds < 0 then
+	if type(seconds) ~= "number" or not (seconds >= 0) then
 		error("Signal.After: seconds must be non-negative")
 	end
 	local h = newHandle(false)
@@ -220,7 +209,7 @@ function Signal.After(seconds: number): any
 end
 
 function Signal.Every(seconds: number): any
-	if type(seconds) ~= "number" or seconds <= 0 then
+	if type(seconds) ~= "number" or not (seconds > 0) then
 		error("Signal.Every: seconds must be positive")
 	end
 	local h = newHandle(false)
@@ -258,11 +247,8 @@ function Signal.FromRoblox(rbxSignal: any, mapper: ((...any) -> any)?): any
 		if r == nil or r.Destroyed then return end
 		local payload: any
 		if mapper ~= nil then
-			local ok, result = pcall(mapper, ...)
-			if not ok then
-				ErrorHandler.Report({ Module = "Signal", Phase = "FromRoblox", Error = result })
-				return
-			end
+			local ok, result = ErrorHandler.Protect(function() return mapper(...) end, "Signal", "FromRoblox")
+			if not ok then return end
 			payload = result
 		else
 			payload = table.pack(...)
@@ -274,6 +260,11 @@ function Signal.FromRoblox(rbxSignal: any, mapper: ((...any) -> any)?): any
 	end)
 	return h
 end
+
+Signal.ReplayPolicy = table.freeze({
+	Count = "Count" :: "Count",
+	Time = "Time" :: "Time",
+})
 
 function Signal.IsSignal(value: unknown): boolean
 	if type(value) ~= "table" then return false end
@@ -300,10 +291,10 @@ end
 function signalMethods:Once(listener: (any) -> ()): Connection.Connection
 	local rec: SignalRecord? = records[self :: any]
 	if rec == nil or rec.Destroyed then
-		error("Signal.Connect: signal is destroyed")
+		error("Signal.Once: signal is destroyed")
 	end
 	if type(listener) ~= "function" then
-		error("Signal.Connect: listener must be a function")
+		error("Signal.Once: listener must be a function")
 	end
 	local r = rec :: SignalRecord
 	local entry: ListenerEntry
@@ -335,10 +326,7 @@ function signalMethods:Fire(payload: any): ()
 	for i = 1, count do
 		local e = listeners[i]
 		if e.Connected then
-			local ok, err = pcall(e.Fn, payload)
-			if not ok then
-				reportError("Listener", err)
-			end
+			ErrorHandler.Protect(function() e.Fn(payload) end, "Signal", "Listener")
 		end
 	end
 	rec.FireDepth -= 1
@@ -420,7 +408,7 @@ function signalMethods:Destroy(): ()
 	local cleanups = table.clone(rec.CleanupFns)
 	table.clear(rec.CleanupFns)
 	for _, fn in cleanups do
-		pcall(fn)
+		ErrorHandler.Protect(fn, "Signal", "Cleanup")
 	end
 end
 
@@ -440,11 +428,8 @@ function signalMethods:Map(mapper: (any) -> any): any
 	local dr = records[derived] :: SignalRecord
 	connectDerived(self, derived, function(payload: any): ()
 		if dr.Destroyed then return end
-		local ok, result = pcall(mapper, payload)
-		if not ok then
-			reportError("Map", result)
-			return
-		end
+		local ok, result = ErrorHandler.Protect(function() return mapper(payload) end, "Signal", "Map")
+		if not ok then return end
 		signalMethods.Fire(derived, result)
 	end)
 	return derived
@@ -458,11 +443,8 @@ function signalMethods:Filter(predicate: (any) -> boolean): any
 	local dr = records[derived] :: SignalRecord
 	connectDerived(self, derived, function(payload: any): ()
 		if dr.Destroyed then return end
-		local ok, result = pcall(predicate, payload)
-		if not ok then
-			reportError("Filter", result)
-			return
-		end
+		local ok, result = ErrorHandler.Protect(function() return predicate(payload) end, "Signal", "Filter")
+		if not ok then return end
 		if result == true then
 			signalMethods.Fire(derived, payload)
 		end
@@ -479,11 +461,8 @@ function signalMethods:Scan(reducer: (any, any) -> any, seed: any): any
 	local acc = seed
 	connectDerived(self, derived, function(payload: any): ()
 		if dr.Destroyed then return end
-		local ok, result = pcall(reducer, acc, payload)
-		if not ok then
-			reportError("Scan", result)
-			return
-		end
+		local ok, result = ErrorHandler.Protect(function() return reducer(acc, payload) end, "Signal", "Scan")
+		if not ok then return end
 		acc = result
 		signalMethods.Fire(derived, acc)
 	end)
@@ -499,11 +478,8 @@ function signalMethods:MergeMap(selector: (any) -> any): any
 	local innerEntries: { ListenerEntry } = {}
 	connectDerived(self, derived, function(payload: any): ()
 		if dr.Destroyed then return end
-		local ok, inner = pcall(selector, payload)
-		if not ok then
-			reportError("MergeMap", inner)
-			return
-		end
+		local ok, inner = ErrorHandler.Protect(function() return selector(payload) end, "Signal", "MergeMap")
+		if not ok then return end
 		if not Signal.IsSignal(inner) then
 			error("Signal.MergeMap: selector must return a Signal")
 		end
@@ -540,11 +516,8 @@ function signalMethods:SwitchMap(selector: (any) -> any): any
 	local currentEntry: ListenerEntry? = nil
 	connectDerived(self, derived, function(payload: any): ()
 		if dr.Destroyed then return end
-		local ok, inner = pcall(selector, payload)
-		if not ok then
-			reportError("SwitchMap", inner)
-			return
-		end
+		local ok, inner = ErrorHandler.Protect(function() return selector(payload) end, "Signal", "SwitchMap")
+		if not ok then return end
 		if not Signal.IsSignal(inner) then
 			error("Signal.SwitchMap: selector must return a Signal")
 		end
@@ -622,9 +595,8 @@ function signalMethods:TakeWhile(predicate: (any) -> boolean): any
 	local dr = records[derived] :: SignalRecord
 	connectDerived(self, derived, function(payload: any): ()
 		if dr.Destroyed then return end
-		local ok, result = pcall(predicate, payload)
+		local ok, result = ErrorHandler.Protect(function() return predicate(payload) end, "Signal", "TakeWhile")
 		if not ok then
-			reportError("TakeWhile", result)
 			signalMethods.Destroy(derived)
 			return
 		end
@@ -650,9 +622,8 @@ function signalMethods:SkipWhile(predicate: (any) -> boolean): any
 			signalMethods.Fire(derived, payload)
 			return
 		end
-		local ok, result = pcall(predicate, payload)
+		local ok, result = ErrorHandler.Protect(function() return predicate(payload) end, "Signal", "SkipWhile")
 		if not ok then
-			reportError("SkipWhile", result)
 			skipping = false
 			signalMethods.Fire(derived, payload)
 			return
@@ -729,7 +700,7 @@ function signalMethods:SkipUntil(starter: any): any
 end
 
 function signalMethods:Debounce(seconds: number): any
-	if type(seconds) ~= "number" or seconds < 0 then
+	if type(seconds) ~= "number" or not (seconds >= 0) then
 		error("Signal.Debounce: seconds must be non-negative")
 	end
 	local derived = Signal.New()
@@ -764,7 +735,7 @@ function signalMethods:Debounce(seconds: number): any
 end
 
 function signalMethods:Throttle(seconds: number, opts: ThrottleOptions?): any
-	if type(seconds) ~= "number" or seconds <= 0 then
+	if type(seconds) ~= "number" or not (seconds > 0) then
 		error("Signal.Throttle: seconds must be positive")
 	end
 	local leading = true
@@ -835,7 +806,7 @@ function signalMethods:Throttle(seconds: number, opts: ThrottleOptions?): any
 end
 
 function signalMethods:Delay(seconds: number): any
-	if type(seconds) ~= "number" or seconds < 0 then
+	if type(seconds) ~= "number" or not (seconds >= 0) then
 		error("Signal.Delay: seconds must be non-negative")
 	end
 	local derived = Signal.New()
@@ -903,7 +874,7 @@ function signalMethods:BufferCount(count: number, step: number?): any
 end
 
 function signalMethods:BufferTime(seconds: number): any
-	if type(seconds) ~= "number" or seconds <= 0 then
+	if type(seconds) ~= "number" or not (seconds > 0) then
 		error("Signal.BufferTime: seconds must be positive")
 	end
 	local derived = Signal.New()
@@ -984,7 +955,7 @@ function signalMethods:ReplayCount(count: number): any
 		error("Signal.ReplayCount: count must be a positive integer")
 	end
 	local rec: SignalRecord? = records[self :: any]
-	if rec == nil then error("Signal.ReplayCount: invalid signal") end
+	if rec == nil or rec.Destroyed then error("Signal.ReplayCount: signal is destroyed") end
 	local r = rec :: SignalRecord
 	if r.ReplayPolicy ~= nil then
 		error("Signal: only one replay policy may be applied")
@@ -995,11 +966,11 @@ function signalMethods:ReplayCount(count: number): any
 end
 
 function signalMethods:ReplayTime(seconds: number): any
-	if type(seconds) ~= "number" or seconds <= 0 then
+	if type(seconds) ~= "number" or not (seconds > 0) then
 		error("Signal.ReplayTime: seconds must be positive")
 	end
 	local rec: SignalRecord? = records[self :: any]
-	if rec == nil then error("Signal.ReplayTime: invalid signal") end
+	if rec == nil or rec.Destroyed then error("Signal.ReplayTime: signal is destroyed") end
 	local r = rec :: SignalRecord
 	if r.ReplayPolicy ~= nil then
 		error("Signal: only one replay policy may be applied")
@@ -1011,7 +982,7 @@ end
 
 function signalMethods:ClearReplay(): any
 	local rec: SignalRecord? = records[self :: any]
-	if rec == nil then return self end
+	if rec == nil or rec.Destroyed then return self end
 	local r = rec :: SignalRecord
 	if r.ReplayPolicy == nil then return self end
 	r.ReplayPolicy = nil

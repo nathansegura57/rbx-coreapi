@@ -31,15 +31,7 @@ local function disconnect(self: Connection): ()
 	-- Clear before calling so it cannot run twice, even if Report throws.
 	record.DisconnectFn = nil
 	if fn ~= nil then
-		local ok, err = pcall(fn)
-		if not ok then
-			ErrorHandler.Report({
-				Module = "Connection",
-				Phase = "Disconnect",
-				Name = nil,
-				Error = err,
-			})
-		end
+		ErrorHandler.Protect(fn, "Connection", "Disconnect")
 	end
 end
 

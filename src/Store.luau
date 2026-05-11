@@ -9,7 +9,6 @@ local Store = {}
 
 export type ReadableStore<T> = {
 	Get: (self: ReadableStore<T>) -> T,
-	Peek: (self: ReadableStore<T>) -> T,
 	Subscribe: (self: ReadableStore<T>, listener: (T, T?) -> (), opts: SubscribeOptions?) -> Connection.Connection,
 	Changed: (self: ReadableStore<T>) -> Signal.Signal<{ New: T, Old: T }>,
 	Map: <U>(self: ReadableStore<T>, picker: (T) -> U, equals: ((U, U) -> boolean)?) -> ReadableStore<U>,
@@ -138,11 +137,8 @@ recomputeDerived = function(handle: any): ()
 	if rec == nil or rec.Destroyed then return end
 	local r = rec :: StoreRecord
 	local oldValue = r.Value
-	local ok, newValue = pcall(r.Compute :: any)
-	if not ok then
-		ErrorHandler.Report({ Module = "Store", Phase = "Derive", Error = newValue })
-		return
-	end
+	local ok, newValue = ErrorHandler.Protect(function() return (r.Compute :: () -> any)() end, "Store", "Derive")
+	if not ok then return end
 	local eq = if r.Equals ~= nil then r.Equals else defaultEquals
 	if eq(oldValue, newValue) then return end
 	r.Value = newValue
@@ -163,10 +159,7 @@ flushStore = function(handle: any): ()
 	local snap = table.clone(r.Subscribers)
 	for _, sub in snap do
 		if sub.Connected then
-			local ok, err = pcall(sub.Fn, newValue, oldValue)
-			if not ok then
-				ErrorHandler.Report({ Module = "Store", Phase = "Subscribe", Error = err })
-			end
+			ErrorHandler.Protect(function() sub.Fn(newValue, oldValue) end, "Store", "Subscribe")
 		end
 	end
 	local keep: { SubscriberEntry } = {}
@@ -474,10 +467,6 @@ function storeMethods:Get(): any
 	return rec.Value
 end
 
-function storeMethods:Peek(): any
-	return storeMethods.Get(self)
-end
-
 function storeMethods:Set(value: any): ()
 	local rec: StoreRecord? = records[self :: any]
 	if rec == nil or rec.Destroyed then
@@ -503,7 +492,7 @@ end
 function storeMethods:Update(updater: any): ()
 	local rec: StoreRecord? = records[self :: any]
 	if rec == nil or rec.Destroyed then
-		error("Store.Set: store is destroyed")
+		error("Store.Update: store is destroyed")
 	end
 	if type(updater) ~= "function" then
 		error("Store.Update: updater must be a function")
@@ -550,18 +539,12 @@ function storeMethods:Subscribe(listener: any, opts: any?): Connection.Connectio
 		entry.Connected = false
 	end)
 	if immediate and not deferred then
-		local ok, err = pcall(listener, r.Value, nil)
-		if not ok then
-			ErrorHandler.Report({ Module = "Store", Phase = "Subscribe", Error = err })
-		end
+		ErrorHandler.Protect(function() listener(r.Value, nil) end, "Store", "Subscribe")
 	elseif immediate and deferred then
 		local v = r.Value
 		Scheduler.Defer(function()
 			if entry.Connected then
-				local ok, err = pcall(listener, v, nil)
-				if not ok then
-					ErrorHandler.Report({ Module = "Store", Phase = "Subscribe", Error = err })
-				end
+				ErrorHandler.Protect(function() listener(v, nil) end, "Store", "Subscribe")
 			end
 		end)
 	end

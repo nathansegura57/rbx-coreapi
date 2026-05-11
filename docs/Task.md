@@ -1,419 +1,681 @@
 # Task
 
-## Purpose
+Structured async tasks with cooperative cancellation. A `Task` represents an async operation that can be awaited, cancelled, and composed with other tasks. `Token` is the cancellation signal passed into task functions. `TaskGroup` collects tasks for bulk cancel and join.
 
-`Task` wraps cancellable async work. A task is a handle around a Luau coroutine with cooperative cancellation, status tracking, finally handlers, combinators, retries, timeouts, and groups.
+---
 
-## Import
+## Enum Tables
 
-```luau
-local Task = require(path.to.Task)
-```
-
-## Public API reference
+### `Task.Status`
 
 ```luau
-Task.Start<T>(fn: (token: Task.Token) -> T, opts: TaskOptions?): Task.Task<T>
-Task.Defer<T>(fn: (token: Task.Token) -> T, opts: TaskOptions?): Task.Task<T>
-Task.Delay<T>(seconds: number, fn: (() -> T)?): Task.Task<T?>
-Task.Sleep(seconds: number, token: Task.Token?): (boolean, string?)
-Task.Resolved<T>(value: T): Task.Task<T>
-Task.Rejected(errorValue: unknown): Task.Task<never>
-Task.Cancelled(reason: string?): Task.Task<never>
-Task.Timeout<T>(inner: Task.Task<T> | (() -> Task.Task<T>), seconds: number, reason: string?): Task.Task<T>
-Task.Retry<T>(makeTask: (token: Task.Token) -> T | Task.Task<T>, opts: RetryOptions): Task.Task<T>
-Task.All(tasks: { Task.Task<any> }): Task.Task<{ any }>
-Task.Race(tasks: { Task.Task<any> }): Task.Task<any>
-Task.Any(tasks: { Task.Task<any> }): Task.Task<any>
-Task.AllSettled(tasks: { Task.Task<any> }): Task.Task<{ SettledResult }>
-Task.FromRoblox(rbxSignal: RBXScriptSignal, untilSignal: RBXScriptSignal?): Task.Task<{ any }?>
-Task.Group(opts: GroupOptions?): Task.TaskGroup
-Task.IsTask(value: unknown): boolean
-Task.IsToken(value: unknown): boolean
-Task.IsGroup(value: unknown): boolean
-Task.SetTracer(fn: ((TraceEvent) -> ())?): ()
-Task.Reason: { [string]: string }
+Task.Status.Pending    -- running
+Task.Status.Fulfilled  -- completed successfully
+Task.Status.Cancelled  -- cancelled via token
+Task.Status.Errored    -- threw an error
 ```
 
-## Types
+### `Task.Reason`
 
-```luau
-export type Status = "Pending" | "Fulfilled" | "Cancelled" | "Errored"
-
-export type Task<T> = {
-    Token: (self: Task<T>) -> Token,
-    Cancel: (self: Task<T>, reason: string?) -> (),
-    Status: (self: Task<T>) -> Status,
-    IsPending: (self: Task<T>) -> boolean,
-    IsFulfilled: (self: Task<T>) -> boolean,
-    IsCancelled: (self: Task<T>) -> boolean,
-    IsErrored: (self: Task<T>) -> boolean,
-    IsDone: (self: Task<T>) -> boolean,
-    Finally: (self: Task<T>, fn: (status: Status, value: unknown?) -> ()) -> Task<T>,
-    Await: (self: Task<T>, token: Token?) -> (boolean, T | unknown),
-    Unwrap: (self: Task<T>, token: Token?) -> T,
-    Result: (self: Task<T>) -> (boolean, T?),
-    Error: (self: Task<T>) -> (boolean, unknown?),
-    Name: (self: Task<T>) -> string?,
-}
-
-export type Token = {
-    Cancelled: (self: Token) -> boolean,
-    Reason: (self: Token) -> string?,
-    OnCancel: (self: Token, fn: (reason: string?) -> ()) -> Connection.Connection,
-}
-
-export type TaskGroup = {
-    Add: (self: TaskGroup, task: Task<any>) -> TaskGroup,
-    Start: (self: TaskGroup, fn: (token: Token) -> any, opts: TaskOptions?) -> Task<any>,
-    CancelAll: (self: TaskGroup, reason: string?) -> (),
-    JoinAll: (self: TaskGroup) -> Task<nil>,
-    Race: (self: TaskGroup) -> Task<any>,
-    Destroy: (self: TaskGroup, reason: string?) -> (),
-    Size: (self: TaskGroup) -> number,
-    Name: (self: TaskGroup) -> string?,
-}
-
-export type TaskOptions = { Name: string? }
-
-export type RetryOptions = {
-    Count: number,
-    Backoff: "Fixed" | "Expo",
-    Base: number,
-    Jitter: number?,
-}
-
-export type SettledResult = {
-    Status: Status,
-    Value: unknown?,
-    Error: unknown?,
-    Reason: string?,
-}
-
-export type TraceEvent = {
-    Event: string,
-    Name: string?,
-    Status: Status?,
-}
-```
-
-## `Task.Reason`
-
-Frozen table of standard cancellation reason strings:
+Standard cancellation reason strings:
 
 ```luau
 Task.Reason.ModeExit   -- FSM mode exited
-Task.Reason.GuardFalse -- guard became false
-Task.Reason.Superseded -- replaced by newer work
-Task.Reason.Timeout    -- operation timed out
-Task.Reason.User       -- explicit cancel call
-Task.Reason.Shutdown   -- system shutdown
-Task.Reason.Capacity   -- queue capacity exceeded
+Task.Reason.GuardFalse -- guard store turned false
+Task.Reason.Superseded -- replaced by Switch concurrency
+Task.Reason.Timeout    -- Task.Timeout fired
+Task.Reason.User       -- Task:Cancel() with no reason
+Task.Reason.Shutdown   -- TaskGroup destroyed
+Task.Reason.Capacity   -- capacity limit hit
 ```
 
-## `Task.Start(fn, opts?)` / `Task.Defer(fn, opts?)`
-
-Creates and starts a task. `Defer` is an alias for `Start` provided for readability.
-
-**Error behavior**
-
-```text
-Task.Start: fn must be a function
-Task.Start: opts must be a table or nil
-Task.Start: Name must be a string or nil
-```
-
-**Behavior**
-
-- Creates a pending task and a cancellation token.
-- Schedules the coroutine via `Scheduler.Defer`.
-- `fn` receives the token as its first argument.
-- Normal return → `Fulfilled` with result (nil preserved).
-- Thrown error → `Errored` with error.
-- If the task is already terminal before the coroutine completes, later results are ignored.
-
-## `Task.Delay(seconds, fn?)`
-
-Creates a task that fulfills after `seconds`. If `fn` is supplied, calls it and fulfills with the return value. If `fn` errors, the task becomes `Errored`.
-
-**Error behavior**
-
-```text
-Task.Delay: seconds must be non-negative
-```
-
-**Cancellation behavior**
-
-If the task is cancelled before the timer fires, the timer is cancelled and the task becomes `Cancelled`.
-
-## `Task.Sleep(seconds, token?)`
-
-Yields the calling coroutine for `seconds`.
-
-**Returns** `(true, nil)` after the delay, or `(false, reason)` if the token is cancelled first.
-
-**Error behavior**
-
-```text
-Task.Sleep: seconds must be non-negative
-Task.Sleep: invalid token
-Task.Sleep: must be called from a yieldable coroutine
-```
-
-**Scheduler behavior**
-
-Uses `Scheduler.Delay` internally. Does not create a Task handle.
-
-## `Task.Resolved(value)` / `Task.Rejected(errorValue)` / `Task.Cancelled(reason?)`
-
-Create pre-settled tasks.
-
-**Behavior**
-
-- `Finally` handlers registered on pre-settled tasks are scheduled through `Scheduler.Defer`.
-
-## `Task.Timeout(inner, seconds, reason?)`
-
-Wraps `inner` with a time limit.
-
-**Error behavior**
-
-```text
-Task.Timeout: seconds must be positive
-Task.Timeout: inner must be a Task or function returning a Task
-```
-
-**Behavior**
-
-- If the timer fires first: cancels `inner` with `reason` (defaults to `Task.Reason.Timeout`) and the outer task becomes `Cancelled`.
-- If `inner` settles first: cancels the timer with `Task.Reason.Superseded` and mirrors inner's status.
-
-## `Task.Retry(makeTask, opts)`
-
-Retries an operation up to `Count` times.
-
-**Options**
+### `Task.Backoff`
 
 ```luau
-{
-    Count: number,         -- positive integer
-    Backoff: "Fixed" | "Expo",
-    Base: number,          -- >= 0
-    Jitter: number?,       -- >= 0, multiplies delay by (1 + random * Jitter)
-}
+Task.Backoff.Fixed  -- constant retry delay
+Task.Backoff.Expo   -- exponential backoff
 ```
 
-**Behavior**
+---
 
-- Each attempt creates a child token linked to the outer token.
-- If the outer token is cancelled, the retry task becomes `Cancelled`.
-- On failure, sleeps a backoff delay before the next attempt.
-- `Fixed` delay = `Base`. `Expo` delay = `Base * 2^(attempt-1)`, capped at 30 seconds.
-- After all attempts fail, the task becomes `Errored` with the last error.
+## API Reference
 
-## `Task.All(tasks)`
+### Constructors
 
-Fulfills when all tasks fulfill. Rejects on first failure.
+#### `Task.Start(fn, opts?)`
 
-**Behavior**
+Spawns an async task. `fn` receives a `Token` and runs inside a new coroutine via `Scheduler.Defer`. The task settles as `Fulfilled` with `fn`'s return value, or `Errored` if `fn` throws.
 
-- Result is an array of values in input order. Nil results are preserved at their index.
-- First errored child → cancel pending siblings with `Superseded`, outer `Errored`.
-- First cancelled child (before any error) → cancel pending siblings, outer `Cancelled`.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `fn` | `(token: Token) -> any` | The task body |
+| `opts` | `TaskOptions?` | Optional `{ Name: string? }` |
 
-## `Task.Race(tasks)`
+**Returns:** `Task<any>`
 
-First settled wins. Losers are not cancelled.
+**Errors:**
+- `Task.Start: fn must be a function`
+- `Task.Start: opts must be a table or nil`
+- `Task.Start: Name must be a string or nil`
 
-## `Task.Any(tasks)`
+```luau
+local t = Task.Start(function(token)
+    local ok = Task.Sleep(2, token)
+    if not ok then return end  -- cancelled during sleep
+    return "done"
+end)
 
-First fulfilled wins. Pending losers are cancelled with `Superseded`.
-
-If all fail: outer `Errored` with `{ Failures = { SettledResult } }`.
-
-## `Task.AllSettled(tasks)`
-
-Waits for all tasks to settle. Never errors due to child failures.
-
-Each result entry: `{ Status, Value?, Error?, Reason? }`.
-
-## `Task.FromRoblox(rbxSignal, untilSignal?)`
-
-Creates a task that waits for an `RBXScriptSignal` to fire once.
-
-**Behavior**
-
-- Main fires → `Fulfilled` with `{ ..., n = count }`.
-- Until signal fires → `Fulfilled` with `nil`.
-- Task cancelled → disconnect both, `Cancelled`.
-
-**Error behavior**
-
-```text
-Task.FromRoblox: rbxSignal must be an RBXScriptSignal
-Task.FromRoblox: untilSignal must be an RBXScriptSignal
+t:Finally(function(status, value)
+    print(status, value)  -- "Fulfilled", "done"
+end)
 ```
 
-## `Task.Group(opts?)`
+---
 
-Creates a task group for managing a collection of pending tasks.
+#### `Task.Delay(seconds, fn?)`
 
-## `Task.IsTask(value)` / `Task.IsToken(value)` / `Task.IsGroup(value)`
+Creates a task that settles after `seconds` seconds. If `fn` is provided, it is called at that point and the task settles with its return value (or `Errored` if it throws). Without `fn`, the task fulfills with `nil`.
 
-Return `true` for handles created by this module.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `seconds` | `number` | Must be `>= 0` |
+| `fn` | `(() -> any)?` | Optional thunk called after the delay |
 
-## `Task.SetTracer(fn?)`
+**Returns:** `Task<any>`
 
-Installs a global tracer. Events: `"Start"`, `"Done"`, `"Error"`, `"Cancel"`.
+**Errors:**
+- `Task.Delay: seconds must be non-negative`
+- `Task.Delay: fn must be a function or nil`
 
-Tracer errors route through `ErrorHandler` phase `"Trace"`.
+```luau
+-- Wait 3 seconds, then do something:
+Task.Delay(3, function()
+    print("3 seconds elapsed")
+end):Finally(function(status)
+    print(status)  -- "Fulfilled"
+end)
+```
 
-## `task:Token()`
+---
+
+#### `Task.Sleep(seconds, token?)`
+
+Yields the current coroutine for `seconds` seconds. Returns `(true, nil)` on success, or `(false, reason)` if the token was cancelled. Must be called from a yieldable coroutine.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `seconds` | `number` | Must be `>= 0` |
+| `token` | `Token?` | Optional cancellation token |
+
+**Returns:** `(boolean, string?)` — `(true, nil)` or `(false, cancelReason)`
+
+**Errors:**
+- `Task.Sleep: seconds must be non-negative`
+- `Task.Sleep: invalid token`
+- `Task.Sleep: must be called from a yieldable coroutine`
+
+```luau
+local t = Task.Start(function(token)
+    for i = 1, 5 do
+        local ok, reason = Task.Sleep(1, token)
+        if not ok then
+            print("cancelled:", reason)
+            return
+        end
+        print("step", i)
+    end
+end)
+```
+
+---
+
+#### `Task.Resolved(value)`
+
+Creates an already-fulfilled task.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `value` | `any` | The fulfilled value |
+
+**Returns:** `Task<any>`
+
+```luau
+local t = Task.Resolved(42)
+local ok, v = t:Await()  -- ok = true, v = 42
+```
+
+---
+
+#### `Task.Rejected(errorValue)`
+
+Creates an already-errored task.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `errorValue` | `unknown` | The error |
+
+**Returns:** `Task<any>`
+
+---
+
+#### `Task.Cancelled(reason?)`
+
+Creates an already-cancelled task.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `reason` | `string?` | Optional cancellation reason |
+
+**Returns:** `Task<any>`
+
+---
+
+### Combinators
+
+#### `Task.All(tasks)`
+
+Fulfills when all tasks fulfill (with an array of their values). Cancels or errors immediately if any task fails, and cancels all remaining tasks with `Task.Reason.Superseded`.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `tasks` | `{ Task<any> }` | Non-empty array |
+
+**Returns:** `Task<{ any }>`
+
+**Errors:**
+- `Task.All: tasks must be a non-empty dense array`
+- `Task.All: task at index {i} is not a valid Task`
+
+```luau
+local combined = Task.All({ taskA, taskB, taskC })
+combined:Finally(function(status, values)
+    if status == Task.Status.Fulfilled then
+        print(values[1], values[2], values[3])
+    end
+end)
+```
+
+---
+
+#### `Task.Race(tasks)`
+
+Settles with the first task to settle (in any status). Other tasks are not cancelled.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `tasks` | `{ Task<any> }` | Non-empty array |
+
+**Returns:** `Task<any>`
+
+**Errors:**
+- `Task.Race: tasks must be a non-empty dense array`
+- `Task.Race: task at index {i} is not a valid Task`
+
+---
+
+#### `Task.Any(tasks)`
+
+Fulfills with the first task to fulfill. If all tasks fail, settles as `Errored` with `{ Failures: { SettledResult } }`.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `tasks` | `{ Task<any> }` | Non-empty array |
+
+**Returns:** `Task<any>`
+
+**Errors:**
+- `Task.Any: tasks must be a non-empty dense array`
+- `Task.Any: task at index {i} is not a valid Task`
+
+---
+
+#### `Task.AllSettled(tasks)`
+
+Waits for all tasks to settle (in any status), then fulfills with an array of `SettledResult` objects. Never cancels or errors.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `tasks` | `{ Task<any> }` | Non-empty array |
+
+**Returns:** `Task<{ SettledResult }>`
+
+**`SettledResult` fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Status` | `Status` | The final status |
+| `Value` | `unknown?` | Fulfilled value (if `Status == "Fulfilled"`) |
+| `Error` | `unknown?` | Error value (if `Status == "Errored"`) |
+| `Reason` | `string?` | Cancel reason (if `Status == "Cancelled"`) |
+
+**Errors:**
+- `Task.AllSettled: tasks must be a non-empty dense array`
+- `Task.AllSettled: task at index {i} is not a valid Task`
+
+---
+
+#### `Task.Timeout(inner, seconds, reason?)`
+
+Wraps a task (or a thunk returning a task) with a timeout. If the inner task doesn't complete within `seconds`, it is cancelled with `reason` (default: `Task.Reason.Timeout`).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `inner` | `Task<any> \| (() -> Task<any>)` | The task or a thunk that creates it |
+| `seconds` | `number` | Must be `> 0` |
+| `reason` | `string?` | Custom cancellation reason |
+
+**Returns:** `Task<any>` — mirrors inner on success; cancels with reason on timeout
+
+**Errors:**
+- `Task.Timeout: seconds must be positive`
+- `Task.Timeout: thunk errored: {error}` — thunk threw
+- `Task.Timeout: thunk must return a Task`
+- `Task.Timeout: inner must be a Task or function returning a Task`
+
+```luau
+local withTimeout = Task.Timeout(longRunningTask, 5)
+withTimeout:Finally(function(status, value)
+    if status == Task.Status.Cancelled then
+        print("timed out!")
+    end
+end)
+```
+
+---
+
+#### `Task.Retry(makeTask, opts)`
+
+Retries a task-producing function up to `Count` times. Succeeds as soon as any attempt fulfills. After all attempts fail, settles as `Errored` with the last error.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `makeTask` | `(token: Token) -> Task<any>` | Returns a new task attempt |
+| `opts` | `RetryOptions` | Required configuration |
+
+**`RetryOptions` fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `Count` | `number` | ✓ | Positive integer; max attempts |
+| `Backoff` | `"Fixed" \| "Expo"` | ✓ | Use `Task.Backoff.*` constants |
+| `Base` | `number` | ✓ | Base delay in seconds; `>= 0` |
+| `Jitter` | `number?` | — | Random multiplier `>= 0`; `0.5` = ±50% |
+
+**Returns:** `Task<any>`
+
+**Errors:**
+- `Task.Retry: opts must be a table`
+- `Task.Retry: Count must be a positive integer`
+- `Task.Retry: Backoff must be 'Fixed' or 'Expo'`
+- `Task.Retry: Base must be >= 0`
+- `Task.Retry: Jitter must be >= 0 or nil`
+- `Task.Retry: makeTask must be a function`
+
+```luau
+local result = Task.Retry(function(token)
+    return Task.Start(function(_t)
+        return fetchData()  -- may throw
+    end)
+end, {
+    Count   = 3,
+    Backoff = Task.Backoff.Expo,
+    Base    = 1,
+    Jitter  = 0.3,
+})
+```
+
+---
+
+#### `Task.FromRoblox(rbxSignal, untilSignal?)`
+
+Creates a task that fulfills when `rbxSignal` fires (payload is `table.pack(...)`). If `untilSignal` fires first, the task fulfills with `nil`. Cancellation via token also resolves the task.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `rbxSignal` | `RBXScriptSignal` | The Roblox signal to await |
+| `untilSignal` | `RBXScriptSignal?` | Optional stop signal |
+
+**Returns:** `Task<table.pack result>`
+
+**Errors:**
+- `Task.FromRoblox: rbxSignal must be an RBXScriptSignal`
+- `Task.FromRoblox: untilSignal must be an RBXScriptSignal`
+
+---
+
+### TaskGroup
+
+#### `Task.Group(opts?)`
+
+Creates a group that tracks pending tasks and supports bulk operations.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `opts` | `{ Name: string? }?` | Optional name |
+
+**Returns:** `TaskGroup`
+
+**Errors:**
+- `Task.Group: opts must be a table or nil`
+- `Task.Group: Name must be a string or nil`
+
+---
+
+#### `group:Add(task)`
+
+Adds a task to the group. No-op if the task is already done. Returns `self`.
+
+**Errors:**
+- `Group.Add: group is destroyed`
+- `Group.Add: invalid task handle`
+
+---
+
+#### `group:Start(fn, opts?)`
+
+Equivalent to `Task.Start(fn, opts)` followed by `group:Add(task)`. Returns the new task.
+
+**Errors:**
+- `Group.Start: group is destroyed`
+
+---
+
+#### `group:CancelAll(reason?)`
+
+Cancels all pending tasks in the group. Default reason: `Task.Reason.ModeExit`.
+
+---
+
+#### `group:JoinAll()`
+
+Returns a task that fulfills when all currently-pending tasks in the group have settled.
+
+**Returns:** `Task<nil>`
+
+---
+
+#### `group:Race()`
+
+Returns a task that settles with the first pending task to settle. If the group is empty, returns an unresolvable pending task.
+
+**Returns:** `Task<any>`
+
+---
+
+#### `group:Size()`
+
+Returns the count of currently-pending tasks.
+
+**Returns:** `number`
+
+---
+
+#### `group:Name()`
+
+Returns the group's name, or `nil`.
+
+**Returns:** `string?`
+
+---
+
+#### `group:Destroy(reason?)`
+
+Cancels all pending tasks and marks the group as destroyed. Default reason: `Task.Reason.ModeExit`.
+
+---
+
+### Predicates
+
+#### `Task.IsTask(value)` / `Task.IsToken(value)` / `Task.IsGroup(value)`
+
+Return `true` if `value` is a valid handle of the respective type.
+
+---
+
+### Tracing
+
+#### `Task.SetTracer(fn?)`
+
+Installs a global tracer called on every task lifecycle event. Pass `nil` to remove.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `fn` | `((TraceEvent) -> ())?` | Called with a `TraceEvent` table |
+
+**`TraceEvent` fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Event` | `string` | `"Start"`, `"Done"`, `"Cancel"`, or `"Error"` |
+| `Name` | `string?` | Task name, if set |
+| `Status` | `Status?` | Current task status at event time |
+
+---
+
+### Task Instance Methods
+
+#### `task:Token()`
 
 Returns the task's cancellation token.
 
-## `task:Cancel(reason?)`
+**Returns:** `Token`
 
-Cancels a pending task. No-op if terminal.
+**Errors:** `Task.Token: invalid task handle`
 
-**Behavior**
+---
 
-- Default reason: `Task.Reason.User`.
-- Marks token cancelled, fires OnCancel hooks (deferred).
-- Sets status to `Cancelled`.
-- Runs finally handlers.
-- Emits trace `"Cancel"`.
+#### `task:Cancel(reason?)`
 
-## `task:Status()` / `task:IsPending()` / `task:IsFulfilled()` / `task:IsCancelled()` / `task:IsErrored()` / `task:IsDone()`
+Cancels the task. No-op if already settled. Default reason: `Task.Reason.User`.
 
-Return the current status or a boolean predicate. `IsDone` returns `true` for any non-`Pending` status.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `reason` | `string?` | Optional reason string |
 
-## `task:Finally(fn)`
+---
 
-Registers a callback to run when the task settles.
+#### `task:Status()`
 
-**Callback signature:** `(status: Status, value: unknown?) -> ()`
+Returns the current status.
 
-- `value` is the result for `Fulfilled`, error for `Errored`, reason for `Cancelled`.
+**Returns:** `"Pending" | "Fulfilled" | "Cancelled" | "Errored"`
 
-**Behavior**
+---
 
-- If the task is already terminal, the callback is scheduled through `Scheduler.Defer`.
-- Returns the same task for chaining.
-- Errors route through `ErrorHandler` phase `"Finally"`.
+#### `task:IsPending()` / `task:IsFulfilled()` / `task:IsCancelled()` / `task:IsErrored()` / `task:IsDone()`
 
-## `task:Await(token?)`
+Status predicates. `IsDone()` returns `true` for any non-Pending status.
 
-Yields the calling coroutine until the task settles.
+---
 
-**Returns** `(true, result)` for `Fulfilled`, `(false, errorOrReason)` otherwise.
+#### `task:Finally(fn)`
 
-**Behavior**
+Registers `fn` to run when the task settles. If already settled, schedules `fn` via `Scheduler.Defer`. Returns `self` for chaining.
 
-- Returns immediately if the task is already terminal.
-- The optional `token` cancels only the await, not the awaited task.
-- Resume is scheduled through `Scheduler.Defer`.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `fn` | `(status: Status, value: unknown?) -> ()` | `value` is the result, error, or cancel reason depending on `status` |
 
-**Error behavior**
+**Errors:**
+- `Task.Finally: fn must be a function`
+- `Task.Finally: invalid task handle`
 
-Must be called from a yieldable coroutine if the task is pending.
+```luau
+task:Finally(function(status, value)
+    if status == Task.Status.Fulfilled then
+        print("result:", value)
+    elseif status == Task.Status.Errored then
+        warn("error:", value)
+    else
+        print("cancelled:", value)  -- value is reason string
+    end
+end)
+```
 
-## `task:Unwrap(token?)`
+---
 
-Calls `Await`. If `ok` is `false`, errors with the returned value.
+#### `task:Await(token?)`
 
-## `task:Result()`
+Yields until the task settles, then returns `(true, value)` on fulfillment or `(false, errorOrReason)` on error/cancel. Passing a `token` allows the `Await` itself to be cancelled.
 
-Returns `(hasResult: boolean, value: T?)`.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `token` | `Token?` | Optional; if cancelled, `Await` returns `(false, reason)` immediately |
 
-`hasResult` is `true` only when status is `Fulfilled`.
+**Returns:** `(boolean, any)` — `(true, value)` or `(false, errorOrReason)`
 
-## `task:Error()`
+**Errors:**
+- `Task.Await: invalid task handle`
+- `Task.Await: invalid token`
+- `Task.Await: must be called from a yieldable coroutine`
 
-Returns `(hasError: boolean, error: unknown?)`.
+```luau
+local ok, value = someTask:Await()
+if ok then
+    print("got:", value)
+end
+```
 
-`hasError` is `true` only when status is `Errored`.
+---
 
-## `task:Name()`
+#### `task:Unwrap(token?)`
 
-Returns the task name or `nil`.
+Like `Await`, but throws on failure instead of returning `(false, ...)`.
 
-## Token methods
+**Returns:** `T`
 
-### `token:Cancelled()`
+**Errors:** re-throws the error or cancel reason on failure
 
-Returns whether the token has been cancelled.
+---
 
-### `token:Reason()`
+#### `task:Result()`
 
-Returns the cancellation reason or `nil`.
+Returns `(true, value)` if fulfilled, `(false, nil)` otherwise. Never yields.
 
-### `token:OnCancel(fn)`
+**Returns:** `(boolean, T?)`
 
-Registers a callback to run when the token is cancelled.
+---
 
-**Behavior**
+#### `task:Error()`
 
-- If the token is already cancelled, the callback is scheduled through `Scheduler.Defer` and a disconnected `Connection` is returned.
-- Errors route through `ErrorHandler` phase `"TokenCancel"`.
+Returns `(true, errorValue)` if errored, `(false, nil)` otherwise.
 
-## Group methods
+**Returns:** `(boolean, unknown?)`
 
-### `group:Add(task)`
+---
 
-Adds a pending task to the group. Terminal tasks are ignored.
+#### `task:Name()`
 
-### `group:Start(fn, opts?)`
+Returns the task name, or `nil`.
 
-Starts a task and adds it to the group.
+**Returns:** `string?`
 
-### `group:CancelAll(reason?)`
+---
 
-Cancels all currently tracked pending tasks. Default reason: `Task.Reason.ModeExit`.
+### Token Instance Methods
 
-### `group:JoinAll()`
+#### `token:Cancelled()`
 
-Returns a task that fulfills `nil` when all currently tracked tasks settle.
+Returns `true` if the token has been cancelled.
 
-### `group:Race()`
+**Returns:** `boolean`
 
-Returns a task that mirrors the first settled task among currently tracked tasks.
+---
 
-### `group:Destroy(reason?)`
+#### `token:Reason()`
 
-Cancels all pending tasks, clears the group, and marks it destroyed. Future `Add`/`Start` calls error.
+Returns the cancellation reason, or `nil` if not cancelled.
 
-### `group:Size()`
+**Returns:** `string?`
 
-Returns the count of currently tracked pending tasks.
+---
 
-### `group:Name()`
+#### `token:OnCancel(fn)`
 
-Returns the group name or `nil`.
+Registers `fn` to run when the token is cancelled. If already cancelled, schedules `fn` via `Scheduler.Defer`. Returns an already-disconnected Connection (the callback still fires).
 
-## Status reference
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `fn` | `(reason: string?) -> ()` | Called with the cancellation reason |
 
-| Status | Terminal | Description |
-|---|---|---|
-| `Pending` | No | Work in progress |
-| `Fulfilled` | Yes | Completed with result |
-| `Errored` | Yes | Completed with error |
-| `Cancelled` | Yes | Cancelled by token |
+**Returns:** `Connection.Connection` — disconnect to unregister
 
-Once terminal, status never changes.
+**Errors:**
+- `Token.OnCancel: fn must be a function`
+- `Token.OnCancel: invalid token handle`
 
-## Cancellation model
+```luau
+local t = Task.Start(function(token)
+    local conn = token:OnCancel(function(reason)
+        print("cancelled because:", reason)
+        -- Run cleanup here
+    end)
+    -- Long-running loop:
+    while not token:Cancelled() do
+        Task.Sleep(0.1, token)
+    end
+    conn:Disconnect()  -- no longer needed
+end)
+```
 
-Cancellation is cooperative. `Cancel` marks the token cancelled and fires hooks. It does not force-terminate a coroutine. Task bodies must check the token or call cancellable APIs (`Task.Sleep`, `task:Await`).
+---
 
-## Nil behavior
+## Gotchas
 
-Nil return values from task functions are stored with presence tracking. `task:Result()` returns `(true, nil)` for a task that fulfilled with nil.
+- **Tasks start deferred.** `Task.Start` schedules the coroutine via `Scheduler.Defer`. The function body does not run synchronously — `Finally` handlers may be registered safely before the body executes.
+- **Cancellation is cooperative.** Cancelling a task signals the token; the task body must check `token:Cancelled()` or use `Task.Sleep` (which returns `false` when cancelled) to actually stop.
+- **`Finally` callbacks are always deferred.** Even if a task is already settled when `Finally` is called, `fn` runs via `Scheduler.Defer`, never synchronously.
+- **`Await` requires a yieldable coroutine.** If called from non-coroutine code (module top level, or `init`), it throws. Always call `Await` inside a `Task.Start` body or equivalent coroutine.
+- **`Task.Retry` inner tasks use their own child tokens.** Cancelling the outer retry task propagates to the current child token. The retry loop checks the outer token between attempts.
+- **`Task.Delay` fn errors settle the task as Errored.** If the thunk passed to `Delay` throws, the resulting task is `Errored`, not `Cancelled`.
+- **`Task.All` cancels siblings on first failure.** Any error or cancellation from one task immediately cancels all remaining pending siblings with `Task.Reason.Superseded`.
+- **`Task.Any` collects all failures.** Only settles as `Errored` after every task has failed, producing a `{ Failures }` table. Use when you want the first success from a pool of fallibles.
+- **TaskGroup does not own tasks.** Adding a task to a group does not prevent external cancellation. `CancelAll` only cancels tasks still in the group's `PendingTasks` set.
 
-## Scheduler behavior
+---
 
-Coroutines are started via `Scheduler.Defer`. Finally handlers and token OnCancel hooks run via `Scheduler.Defer`. `Task.Await` resumes are scheduled via `Scheduler.Defer`.
+## Complete Example
 
-## Not implemented
+```luau
+local Task = require(path.to.Task)
 
-Forcible coroutine termination is not supported. Cancellation is always cooperative.
+-- Fetch with retry and timeout.
+local function fetchWithRetry(url: string): Task.Task<string>
+    return Task.Timeout(
+        Task.Retry(function(token)
+            return Task.Start(function(_t)
+                -- Simulated fetch that may fail
+                local data = httpGet(url)
+                return data
+            end)
+        end, {
+            Count   = 3,
+            Backoff = Task.Backoff.Expo,
+            Base    = 0.5,
+            Jitter  = 0.2,
+        }),
+        10,
+        "FetchTimeout"
+    )
+end
+
+local group = Task.Group({ Name = "FetchGroup" })
+
+local t = group:Start(function(token)
+    local ok, data = fetchWithRetry("https://example.com/api"):Await(token)
+    if not ok then
+        warn("fetch failed:", data)
+        return
+    end
+    print("got data:", data)
+end)
+
+t:Finally(function(status)
+    print("task finished with:", status)
+end)
+
+-- Cancel everything after 15 seconds if still running
+Task.Delay(15, function()
+    group:CancelAll("Shutdown")
+end)
+```

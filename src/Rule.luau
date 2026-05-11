@@ -62,6 +62,7 @@ export type Metrics = {
 	Skipped: number,
 	Errors: number,
 	AvgMs: number,
+	CollectedErrors: { unknown },
 }
 
 export type TraceEvent = {
@@ -146,6 +147,7 @@ type RuleRecord = {
 	Skipped: number,
 	Errors: number,
 	TotalMs: number,
+	CollectedErrors: { unknown },
 }
 
 -- ── Private storage ───────────────────────────────────────────────────────────
@@ -160,21 +162,11 @@ local _scopeAttach: { [any]: { any } } = setmetatable({}, { __mode = "k" } :: an
 local _tracer: ((TraceEvent) -> ())? = nil
 
 local function emitTrace(event: string, rec: RuleRecord)
-	if not rec.Policy.Trace and _tracer == nil then
-		return
-	end
-	if _tracer == nil then
-		return
-	end
+	if _tracer == nil then return end
 	local fn = _tracer :: (TraceEvent) -> ()
-	local ok, err = pcall(fn, {
-		Event = event,
-		RuleName = rec.RuleName,
-		Tag = rec.Policy.Tag,
-	})
-	if not ok then
-		ErrorHandler.Report({ Module = "Rule", Phase = "Trace", Error = err })
-	end
+	ErrorHandler.Protect(function()
+		fn({ Event = event, RuleName = rec.RuleName, Tag = rec.Policy.Tag })
+	end, "Rule", "Trace")
 end
 
 -- ── Metatable ─────────────────────────────────────────────────────────────────
@@ -341,18 +333,23 @@ end
 
 -- ── Effect error handler ──────────────────────────────────────────────────────
 
-local function handleEffectError(rec: RuleRecord, err: any)
+-- Handles an effect error according to the rule's own ErrorPolicy, independent
+-- of the global ErrorHandler policy. Only the nil (absent) case delegates to
+-- the global handler so that callers can configure global behaviour as a default.
+local function handleEffectError(rec: RuleRecord, err: unknown)
 	rec.Errors += 1
-	local ep = rec.Policy.ErrorPolicy
-	if ep == nil or ep == "Warn" then
+	local errorPolicy = rec.Policy.ErrorPolicy
+	if errorPolicy == nil then
+		-- No rule-level override; use the global ErrorHandler.
 		ErrorHandler.Report({ Module = "Rule", Phase = "Effect", Error = err })
-	elseif ep == "Throw" then
+	elseif errorPolicy == "Warn" then
+		warn(`Rule.Effect[{rec.RuleName}]: {tostring(err)}`)
+	elseif errorPolicy == "Throw" then
 		error(err, 0)
-	elseif ep == "Swallow" then
-		-- ignore
-	elseif ep == "Collect" then
-		ErrorHandler.Report({ Module = "Rule", Phase = "Effect", Error = err })
+	elseif errorPolicy == "Collect" then
+		table.insert(rec.CollectedErrors, err)
 	end
+	-- "Swallow": discard silently.
 end
 
 -- ── Context resolution ────────────────────────────────────────────────────────
@@ -380,19 +377,17 @@ local function evalGuard(rec: RuleRecord, payload: any, frame: RuleFrame): boole
 		return true
 	end
 	if Store.IsStore(g) then
-		local ok, result = pcall(function() return (g :: any):Get() end)
+		local ok, result = ErrorHandler.Protect(function() return (g :: any):Get() end, "Rule", "Guard")
 		if not ok then
 			rec.Errors += 1
-			ErrorHandler.Report({ Module = "Rule", Phase = "Guard", Error = result })
 			return false
 		end
 		return result == true
 	else
 		local ctx = resolveCtx(rec)
-		local ok, result = pcall(g :: any, ctx, payload, frame)
+		local ok, result = ErrorHandler.Protect(function() return (g :: any)(ctx, payload, frame) end, "Rule", "Guard")
 		if not ok then
 			rec.Errors += 1
-			ErrorHandler.Report({ Module = "Rule", Phase = "Guard", Error = result })
 			return false
 		end
 		return result == true
@@ -441,10 +436,9 @@ local function runDisposer(rec: RuleRecord)
 	local d = rec.Disposer
 	rec.Disposer = nil
 	if d ~= nil then
-		local ok, err = pcall(d)
+		local ok = ErrorHandler.Protect(d, "Rule", "Disposer")
 		if not ok then
 			rec.Errors += 1
-			ErrorHandler.Report({ Module = "Rule", Phase = "Disposer", Error = err })
 		end
 	end
 end
@@ -751,6 +745,7 @@ function Rule.New(name: string): any
 		Skipped = 0,
 		Errors = 0,
 		TotalMs = 0,
+		CollectedErrors = {},
 	}
 	local handle = setmetatable({}, ruleMeta)
 	ruleRecords[handle] = rec
@@ -1020,6 +1015,7 @@ function ruleMethods:Metrics(): Metrics
 		Skipped = rec.Skipped,
 		Errors = rec.Errors,
 		AvgMs = if rec.Runs > 0 then rec.TotalMs / rec.Runs else 0,
+		CollectedErrors = table.clone(rec.CollectedErrors),
 	}
 end
 
@@ -1032,6 +1028,26 @@ function ruleMethods:ResetMetrics(): ()
 	rec.Skipped = 0
 	rec.Errors = 0
 	rec.TotalMs = 0
+	table.clear(rec.CollectedErrors)
 end
+
+-- Enum tables: use Rule.Concurrency.Exhaust etc. instead of raw strings in Policy.
+Rule.Concurrency = table.freeze({
+	Exhaust = "Exhaust" :: "Exhaust",
+	Merge = "Merge" :: "Merge",
+	Concat = "Concat" :: "Concat",
+	Switch = "Switch" :: "Switch",
+})
+
+Rule.Overflow = table.freeze({
+	Drop = "Drop" :: "Drop",
+	Latest = "Latest" :: "Latest",
+	Fifo = "Fifo" :: "Fifo",
+})
+
+Rule.Schedule = table.freeze({
+	Immediate = "Immediate" :: "Immediate",
+	Deferred = "Deferred" :: "Deferred",
+})
 
 return Rule

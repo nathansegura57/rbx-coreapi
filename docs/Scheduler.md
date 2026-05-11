@@ -1,28 +1,169 @@
 # Scheduler
 
-## Purpose
+The time and frame-scheduling abstraction. Every module that touches time calls `Scheduler` exclusively — never `task.defer`, `task.delay`, or `RunService.Heartbeat` directly. Swapping in a `MockScheduler` at test time gives you deterministic control over all async behavior in the entire library.
 
-`Scheduler` is the only kernel module that directly accesses Roblox scheduling, timing, and frame primitives. All other kernel modules use `Scheduler` for deferred execution, delays, cancellation, and time queries.
+---
 
-## Import
+## API Reference
+
+### `Scheduler.Defer(fn)`
+
+Schedules `fn` to run after the current frame, wrapped in error protection. Errors from `fn` are routed through `ErrorHandler`.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `fn` | `() -> ()` | The function to defer |
+
+**Returns:** `any?` — an opaque handle that can be passed to `Scheduler.Cancel`.
+
+**Errors:**
+- `Scheduler.Defer: fn must be a function`
 
 ```luau
-local Scheduler = require(path.to.Scheduler)
+Scheduler.Defer(function()
+    print("runs next frame")
+end)
 ```
 
-## Public API reference
+---
+
+### `Scheduler.Delay(seconds, fn)`
+
+Schedules `fn` to run after `seconds` seconds, wrapped in error protection.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `seconds` | `number` | Delay in seconds; must be `>= 0` |
+| `fn` | `() -> ()` | The function to call after the delay |
+
+**Returns:** `any?` — an opaque timer handle for `Scheduler.Cancel`.
+
+**Errors:**
+- `Scheduler.Delay: seconds must be non-negative`
+- `Scheduler.Delay: fn must be a function`
 
 ```luau
-Scheduler.Defer(fn: () -> ()): any?
-Scheduler.Delay(seconds: number, fn: () -> ()): any?
-Scheduler.Cancel(handle: any?): ()
-Scheduler.Now(): number
-Scheduler.OnStep(fn: (dt: number) -> ()): Connection.Connection
-Scheduler.SetDriver(driver: Driver): ()
-Scheduler.ResetDriver(): ()
+local handle = Scheduler.Delay(2, function()
+    print("2 seconds later")
+end)
+
+-- Cancel before it fires:
+Scheduler.Cancel(handle)
 ```
 
-## Types
+---
+
+### `Scheduler.Cancel(handle)`
+
+Cancels a pending `Defer` or `Delay` handle. Safe to call with `nil` or an already-fired handle.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `handle` | `any?` | Handle returned by `Defer` or `Delay`. May be `nil`. |
+
+**Returns:** nothing
+
+```luau
+local h = Scheduler.Delay(5, cleanup)
+-- Changed our mind:
+Scheduler.Cancel(h)
+```
+
+---
+
+### `Scheduler.Now()`
+
+Returns the current elapsed time (seconds since server start) from the active driver.
+
+**Returns:** `number`
+
+**Errors:**
+- `Scheduler.Now: driver returned non-number` — custom driver returned a non-numeric value
+
+```luau
+local t0 = Scheduler.Now()
+-- ... some work ...
+local elapsed = Scheduler.Now() - t0
+```
+
+---
+
+### `Scheduler.OnStep(fn)`
+
+Connects `fn` to the frame step (Heartbeat) event. Called once per frame with `dt` (delta time in seconds). Errors from `fn` are routed through `ErrorHandler`.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `fn` | `(dt: number) -> ()` | Frame callback |
+
+**Returns:** `Connection.Connection` — disconnect to unsubscribe.
+
+**Errors:**
+- `Scheduler.OnStep: fn must be a function`
+- `Scheduler.OnStep: no step driver available` — running outside Roblox without a custom driver that implements `OnStep`
+- `Scheduler.OnStep: driver must return Connection` — custom driver returned something other than a `Connection`
+
+```luau
+local conn = Scheduler.OnStep(function(dt)
+    print("frame:", dt)
+end)
+-- later:
+conn:Disconnect()
+```
+
+---
+
+### `Scheduler.SetDriver(driver)`
+
+Replaces the active driver with a custom implementation. Any field may be omitted; missing fields fall back to the Roblox defaults.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `driver` | `Driver` | Partial driver table — see below |
+
+**`Driver` fields** (all optional):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Defer` | `((() -> ()) -> any)?` | Defer implementation |
+| `Delay` | `((number, () -> ()) -> any)?` | Delay implementation |
+| `Cancel` | `((any) -> ())?` | Cancel implementation |
+| `Now` | `(() -> number)?` | Current time implementation |
+| `OnStep` | `(((number) -> ()) -> Connection)?` | Frame step implementation |
+
+**Errors:**
+- `Scheduler.SetDriver: driver must be a table`
+- `Scheduler.SetDriver: {field} must be a function or nil` — a field was present but not a function
+
+```luau
+local queue: { () -> () } = {}
+local fakeTime = 0
+
+Scheduler.SetDriver({
+    Defer = function(fn) table.insert(queue, fn) end,
+    Delay = function(_s, fn) table.insert(queue, fn) end,  -- ignores time in this simple mock
+    Cancel = function(_h) end,
+    Now = function() return fakeTime end,
+})
+
+-- Flush manually:
+for _, fn in queue do fn() end
+table.clear(queue)
+```
+
+---
+
+### `Scheduler.ResetDriver()`
+
+Restores the default Roblox driver (`task.defer`, `task.delay`, `task.cancel`, `time()`, `RunService.Heartbeat`).
+
+```luau
+Scheduler.ResetDriver()
+```
+
+---
+
+## Driver Type
 
 ```luau
 export type Driver = {
@@ -34,126 +175,40 @@ export type Driver = {
 }
 ```
 
-## Default driver
+---
 
-| Function | Default implementation |
-|---|---|
-| `Defer` | `task.defer` |
-| `Delay` | `task.delay` |
-| `Cancel` | `task.cancel` |
-| `Now` | `time()` |
-| `OnStep` | `RunService.Heartbeat` |
+## Testing with MockScheduler
 
-## `Scheduler.Defer(fn)`
+`tests/TestKit.luau` provides `ctx.Mock`, which installs a `MockScheduler`. Use it to control time and flush deferred callbacks synchronously:
 
-Schedules `fn` to run after the current call stack.
+```luau
+local TestKit = require(path.to.tests.TestKit)
 
-**Error behavior**
+local suite = TestKit.Suite("Scheduler tests")
 
-```text
-Scheduler.Defer: fn must be a function
+suite:Test("deferred callback fires on flush", function(ctx)
+    local fired = false
+    Scheduler.Defer(function() fired = true end)
+    ctx:Expect(fired):ToBe(false)   -- not yet
+    ctx.Mock:Flush()
+    ctx:Expect(fired):ToBe(true)    -- now it ran
+end)
+
+suite:Test("delay respects time", function(ctx)
+    local fired = false
+    Scheduler.Delay(3, function() fired = true end)
+    ctx.Mock:Advance(2)
+    ctx:Expect(fired):ToBe(false)
+    ctx.Mock:Advance(2)             -- total 4s → fires
+    ctx:Expect(fired):ToBe(true)
+end)
 ```
 
-**Behavior**
+---
 
-- Wraps `fn` so errors are routed through `ErrorHandler` with phase `"Defer"`.
-- Returns the driver handle or `nil`.
-- Preserves the ordering guarantees of the active driver.
+## Gotchas
 
-## `Scheduler.Delay(seconds, fn)`
-
-Schedules `fn` to run after `seconds` have elapsed.
-
-**Error behavior**
-
-```text
-Scheduler.Delay: seconds must be non-negative
-Scheduler.Delay: fn must be a function
-```
-
-**Behavior**
-
-- `seconds = 0` is valid; the callback is deferred per driver semantics, not run synchronously.
-- Wraps `fn` so errors are routed through `ErrorHandler` with phase `"Delay"`.
-
-## `Scheduler.Cancel(handle)`
-
-Cancels a scheduled handle.
-
-**Behavior**
-
-- If `handle == nil`, returns immediately.
-- Calls the driver's `Cancel` if available.
-- Cancellation errors are routed through `ErrorHandler` with phase `"Cancel"`.
-
-## `Scheduler.Now()`
-
-Returns the current scheduler time in seconds.
-
-**Behavior**
-
-- Calls the driver's `Now`.
-- Returns a `number`.
-- If the driver returns a non-number, errors:
-
-```text
-Scheduler.Now: driver returned non-number
-```
-
-**Scheduler behavior**
-
-`Now()` defaults to `time()`. Do not use `os.clock()`, `os.time()`, or `tick()` in other kernel modules.
-
-## `Scheduler.OnStep(fn)`
-
-Registers a per-frame callback receiving `dt`.
-
-**Error behavior**
-
-```text
-Scheduler.OnStep: fn must be a function
-Scheduler.OnStep: no step driver available
-Scheduler.OnStep: driver must return Connection
-```
-
-**Behavior**
-
-- Callback errors route through `ErrorHandler` with phase `"OnStep"`.
-- Returns a `Connection`; disconnecting stops future callbacks.
-
-## `Scheduler.SetDriver(driver)`
-
-Installs partial overrides. Omitted fields keep defaults.
-
-**Error behavior**
-
-```text
-Scheduler.SetDriver: driver must be a table
-Scheduler.SetDriver: Defer must be a function or nil
-Scheduler.SetDriver: Delay must be a function or nil
-Scheduler.SetDriver: Cancel must be a function or nil
-Scheduler.SetDriver: Now must be a function or nil
-Scheduler.SetDriver: OnStep must be a function or nil
-```
-
-**Behavior**
-
-- Existing scheduled callbacks are not migrated or cancelled.
-- Future calls use the new driver.
-
-## `Scheduler.ResetDriver()`
-
-Restores the default driver captured at module load.
-
-**Behavior**
-
-- Does not cancel existing handles.
-- Does not clear collected errors.
-
-## Callback error handling
-
-All scheduled callbacks are protected. Errors call `ErrorHandler.Report`. If `ErrorHandler.Report` re-throws (`"Throw"` policy), the throw propagates from the scheduled callback. `Scheduler` never reports errors thrown by `ErrorHandler.Report`.
-
-## Not implemented
-
-`Scheduler.SetDriver` and `Scheduler.ResetDriver` replace `FSM.SetScheduler` from prior versions. Use those instead.
+- **Never call Roblox primitives directly.** All CoreAPI modules call `Scheduler.*` only. Tests that call `task.defer` or `time()` directly bypass the mock and will behave non-deterministically.
+- **`OnStep` is unavailable without a Roblox driver.** Outside of Roblox (e.g. a standalone Luau runtime), `OnStep` is `nil` in the default driver. Call `SetDriver` with a custom `OnStep` if you need frame callbacks in that environment.
+- **`Now()` falls back to `0` on driver error.** If the driver's `Now` function throws and the policy is not `Throw`, `Scheduler.Now` returns `0` rather than propagating the failure.
+- **Errors from scheduled callbacks are routed, not rethrown.** `Defer` and `Delay` wrap callbacks in pcall and call `ErrorHandler.Report`. The error reaches your reporter, but does not bubble up from the scheduling call site.

@@ -1,373 +1,534 @@
 # Store
 
-## Purpose
+A reactive state cell. A `Store` holds a single value; subscribers are notified whenever it changes. Derived stores and combinators let you compose reactive data pipelines without manual glue code.
 
-`Store` is reactive state. Stores hold values, derive computed values, notify subscribers, and expose snapshot and history utilities.
+Changes are batched automatically — subscribers receive one notification per frame, not one per `Set` call. Use `Store.Batch` or `Store.Transaction` to coalesce multiple stores.
 
-## Import
+---
+
+## API Reference
+
+### Constructors
+
+#### `Store.Value(initial, opts?)`
+
+Creates a new writable store.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `initial` | `T` | Initial value |
+| `opts` | `ValueOptions<T>?` | Optional configuration |
+
+**`ValueOptions<T>` fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Name` | `string?` | `nil` | Global registry name; must be non-empty |
+| `Equals` | `((T, T) -> boolean)?` | `==` | Custom equality; prevents notification when `true` |
+| `ReplaceName` | `boolean?` | `false` | If `true`, overwrites an existing named store |
+
+**Returns:** `WritableStore<T>`
+
+**Errors:**
+- `Store.Value: opts must be a table or nil`
+- `Store.Value: Name must be a non-empty string or nil`
+- `Store.Value: Equals must be a function or nil`
+- `Store.Value: ReplaceName must be a boolean or nil`
+- `Store.Value: duplicate store name '{name}'`
 
 ```luau
-local Store = require(path.to.Store)
+local score = Store.Value(0)
+local name  = Store.Value("Player", { Name = "PlayerName" })
+local vec2  = Store.Value(Vector2.zero, {
+    Equals = function(a, b) return a == b end,
+})
 ```
 
-## Public API reference
+---
+
+#### `Store.Const(value)`
+
+Creates an immutable store. Attempting to call `Set` on it throws. Useful as a stable dependency or placeholder.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `value` | `T` | The fixed value |
+
+**Returns:** `ReadableStore<T>`
+
+---
+
+#### `Store.Derive(compute, deps, opts?)`
+
+Creates a derived store whose value is the result of `compute()`. Recomputed automatically whenever any `deps` store changes.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `compute` | `() -> T` | Pure function; **must not have side effects** |
+| `deps` | `{ ReadableStore<any> }` | Non-empty array of stores this computation reads |
+| `opts` | `DeriveOptions<T>?` | Same fields as `ValueOptions` |
+
+**Returns:** `ReadableStore<T>`
+
+**Errors:**
+- `Store.Derive: compute must be a function`
+- `Store.Derive: deps must be a non-empty dense array`
+- `Store.Derive: dep at index {i} is not a live Store`
+- `Store.Derive: initial compute failed: {error}` — `compute()` threw during construction
+- `Store.Derive: Name must be a non-empty string or nil`
+- `Store.Derive: duplicate store name '{name}'`
 
 ```luau
-Store.Value<T>(initial: T, opts: ValueOptions<T>?): Store.WritableStore<T>
-Store.Const<T>(value: T): Store.ReadableStore<T>
-Store.Derive<T>(compute: () -> T, deps: { Store.ReadableStore<any> }, opts: DeriveOptions<T>?): Store.ReadableStore<T>
-Store.Select<S, T>(source: Store.ReadableStore<S>, picker: (S) -> T, equals: ((T, T) -> boolean)?): Store.ReadableStore<T>
-Store.Combine(values: any): Store.ReadableStore<any>
-Store.AllTruthy(stores: { Store.ReadableStore<any> }): Store.ReadableStore<boolean>
-Store.AnyTruthy(stores: { Store.ReadableStore<any> }): Store.ReadableStore<boolean>
-Store.Match(source: Store.ReadableStore<any>, cases: { [any]: Store.ReadableStore<any> }): Store.ReadableStore<any>
-Store.Readonly<T>(store: Store.WritableStore<T>): Store.ReadableStore<T>
-Store.IsStore(value: unknown): boolean
-Store.Batch(block: () -> ()): ()
-Store.Transaction(block: () -> ()): ()
-Store.Snapshot(...stores: Store.ReadableStore<any>): Snapshot
-Store.Restore(snapshot: Snapshot, opts: RestoreOptions?): ()
-Store.History<T>(store: Store.WritableStore<T>, limit: number?): History<T>
+local a = Store.Value(3)
+local b = Store.Value(4)
+local hypotenuse = Store.Derive(function()
+    return math.sqrt(a:Get() ^ 2 + b:Get() ^ 2)
+end, { a, b })
+
+a:Set(5)
+-- hypotenuse recomputes automatically
 ```
 
-## Types
+---
+
+#### `Store.Select(source, picker, equals?)`
+
+Shorthand for a derived store that maps a single source. Equivalent to `Store.Derive(function() return picker(source:Get()) end, { source }, { Equals = equals })`.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `source` | `ReadableStore<T>` | The store to project from |
+| `picker` | `(T) -> U` | Extracts a sub-value |
+| `equals` | `((U, U) -> boolean)?` | Optional equality override |
+
+**Returns:** `ReadableStore<U>`
+
+**Errors:**
+- `Store.Select: source must be a live Store`
+- `Store.Select: picker must be a function`
+- `Store.Select: equals must be a function or nil`
 
 ```luau
-export type ReadableStore<T> = {
-    Get: (self: ReadableStore<T>) -> T,
-    Peek: (self: ReadableStore<T>) -> T,
-    Subscribe: (self: ReadableStore<T>, listener: (T, T?) -> (), opts: SubscribeOptions?) -> Connection.Connection,
-    Changed: (self: ReadableStore<T>) -> Signal.Signal<{ New: T, Old: T }>,
-    Map: <U>(self: ReadableStore<T>, picker: (T) -> U, equals: ((U, U) -> boolean)?) -> ReadableStore<U>,
-    Equals: (self: ReadableStore<T>, equals: (T, T) -> boolean) -> ReadableStore<T>,
-    Name: (self: ReadableStore<T>) -> string?,
-    Deps: (self: ReadableStore<T>) -> { ReadableStore<any> },
-    Wait: (self: ReadableStore<T>) -> (T, T),
-    DisconnectAll: (self: ReadableStore<T>) -> (),
-    IsDestroyed: (self: ReadableStore<T>) -> boolean,
-    Destroy: (self: ReadableStore<T>) -> (),
-}
-
-export type WritableStore<T> = ReadableStore<T> & {
-    Set: (self: WritableStore<T>, value: T) -> (),
-    Update: (self: WritableStore<T>, updater: (T) -> T) -> (),
-}
-
-export type ValueOptions<T> = {
-    Name: string?,
-    Equals: ((oldValue: T, newValue: T) -> boolean)?,
-    ReplaceName: boolean?,
-}
-
-export type DeriveOptions<T> = ValueOptions<T>
-
-export type SubscribeOptions = {
-    Immediate: boolean?,
-    Deferred: boolean?,
-}
-
-export type Snapshot = any
-export type RestoreOptions = { Strict: boolean? }
-export type History<T> = {
-    Undo: () -> boolean,
-    Redo: () -> boolean,
-    Clear: () -> (),
-    Destroy: () -> (),
-    CanUndo: ReadableStore<boolean>,
-    CanRedo: ReadableStore<boolean>,
-}
+local player = Store.Value({ Name = "Alice", Score = 0 })
+local playerName = Store.Select(player, function(p) return p.Name end)
 ```
 
-## `Store.Value(initial, opts?)`
+---
 
-Creates a writable store with an initial value.
+#### `Store.Combine(values)`
 
-**Options**
+Creates a derived store from multiple sources combined into a single table. Accepts either an array of stores (produces an ordered array result) or a map of `{ [key] = store }` (produces a map result).
 
-- `Name` — string name for snapshot/restore registry.
-- `Equals` — custom equality function. Default is `==`.
-- `ReplaceName` — if `true`, allow re-registering an existing name. Default `false`.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `values` | `{ ReadableStore<any> } \| { [any]: ReadableStore<any> }` | Array or map of stores |
 
-**Error behavior**
+**Returns:** `ReadableStore<{ any }>`
 
-```text
-Store.Value: opts must be a table or nil
-Store.Value: Name must be a non-empty string
-Store.Value: Equals must be a function
-Store.Value: ReplaceName must be a boolean
-Store.Value: duplicate store name '<name>'
+**Errors:**
+- `Store.Combine: input must be a table`
+- `Store.Combine: input must not be empty`
+- `Store.Combine: entry at index {i} is not a live Store`
+- `Store.Combine: value for key '{k}' is not a live Store`
+
+```luau
+-- Array form: result is { score, health }
+local stats = Store.Combine({ scoreStore, healthStore })
+
+-- Map form: result is { Score = ..., Health = ... }
+local statsMap = Store.Combine({ Score = scoreStore, Health = healthStore })
 ```
 
-**Nil behavior**
+---
 
-Nil as initial value is stored with presence tracking.
+#### `Store.AllTruthy(stores)`
 
-## `Store.Const(value)`
+A derived boolean store that is `true` when every store in `stores` holds a truthy value.
 
-Creates a read-only store whose value never changes.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `stores` | `{ ReadableStore<any> }` | Non-empty array of live stores |
 
-**Behavior**
+**Returns:** `ReadableStore<boolean>`
 
-- `Get` always returns `value`.
-- `Changed` returns a signal that never fires while alive.
-- `Set` and `Update` error dynamically.
+**Errors:**
+- `Store.AllTruthy: stores must be a non-empty dense array of live Stores`
+- `Store.AllTruthy: entry at index {i} is not a live Store`
 
-## `Store.Derive(compute, deps, opts?)`
+---
 
-Creates a readable store whose value is computed from its dependencies.
+#### `Store.AnyTruthy(stores)`
 
-**Error behavior**
+A derived boolean store that is `true` when at least one store in `stores` holds a truthy value.
 
-```text
-Store.Derive: compute must be a function
-Store.Derive: deps must be a non-empty dense array
-Store.Derive: dep at index <n> is not a live Store
-Store.Derive: initial compute failed: <message>
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `stores` | `{ ReadableStore<any> }` | Non-empty array of live stores |
+
+**Returns:** `ReadableStore<boolean>`
+
+**Errors:**
+- `Store.AnyTruthy: stores must be a non-empty dense array of live Stores`
+
+---
+
+#### `Store.Match(source, cases)`
+
+A derived store whose value tracks a `cases` map indexed by `source:Get()`. The `"_"` key is the default case.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `source` | `ReadableStore<any>` | The key store |
+| `cases` | `{ [any]: ReadableStore<any> }` | Map of key → store; may include `"_"` default |
+
+**Returns:** `ReadableStore<any>`
+
+**Errors:**
+- `Store.Match: source must be a live Store`
+- `Store.Match: cases must be a table`
+- `Store.Match: case '{k}' is not a live Store`
+- `Store.Match: initial case not found and no default '_' case`
+- Route error (`ErrorHandler.Report`) when a key changes to a value with no case and no default
+
+```luau
+local mode = Store.Value("idle")
+local idleDisplay  = Store.Value("Waiting...")
+local playDisplay  = Store.Value("Playing!")
+local activeText = Store.Match(mode, {
+    idle    = idleDisplay,
+    playing = playDisplay,
+    _       = Store.Const("Unknown"),
+})
 ```
 
-**Behavior**
+---
 
-- Runs `compute()` immediately on creation.
-- Recomputes eagerly when any dep changes.
-- If compute errors after init: routes through `ErrorHandler` phase `"Derive"`. If policy is not `"Throw"`, keeps previous value.
-- If new value equals old value, no notification is issued.
-- Destroying any dep destroys this store.
+#### `Store.Readonly(store)`
 
-## `Store.Select(source, picker, equals?)`
+Creates a derived store that mirrors `store` but cannot be written to via `Set`.
 
-Shorthand for `Store.Derive(() -> picker(source:Get()), { source }, { Equals = equals })`.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `store` | `ReadableStore<T>` | Must be a live Store |
 
-## `Store.Combine(values)`
+**Returns:** `ReadableStore<T>`
 
-Combines an array or object of stores into a derived store of the same shape.
+**Errors:**
+- `Store.Readonly: store must be a live Store`
 
-**Behavior**
+---
 
-- Array input: result is an array of current store values.
-- Object input: result is an object with the same keys.
+#### `Store.IsStore(value)`
 
-**Error behavior**
+Returns `true` if `value` is a live Store handle.
 
-```text
-Store.Combine: input must be a non-empty table
-Store.Combine: value at index/key <k> is not a live Store
+**Returns:** `boolean`
+
+---
+
+### Instance Methods
+
+#### `handle:Get()`
+
+Returns the current value.
+
+**Errors:**
+- `Store.Get: store is destroyed`
+
+---
+
+#### `handle:Set(value)`
+
+Updates the value and schedules subscribers for notification. No-op if `value` equals the current value (by the configured `Equals` function).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `value` | `T` | New value |
+
+**Errors:**
+- `Store.Set: store is destroyed`
+- `Store.Set: store is read-only`
+- `Store.Set: only writable stores support Set`
+
+---
+
+#### `handle:Update(updater)`
+
+Calls `updater(currentValue)` and passes the result to `Set`. If `updater` throws, the error is re-thrown from `Update` without changing the store.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `updater` | `(T) -> T` | Pure transform function |
+
+**Errors:**
+- `Store.Update: store is destroyed`
+- `Store.Update: updater must be a function`
+- Re-throws any error thrown by `updater`
+
+```luau
+count:Update(function(n) return n + 1 end)
 ```
 
-## `Store.AllTruthy(stores)`
+---
 
-Returns `true` when all store values are Luau-truthy.
+#### `handle:Subscribe(listener, opts?)`
 
-## `Store.AnyTruthy(stores)`
+Subscribes `listener` to value changes. By default, calls `listener(currentValue, nil)` immediately (synchronously), then `listener(newValue, oldValue)` on every subsequent change.
 
-Returns `true` when any store value is Luau-truthy.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `listener` | `(T, T?) -> ()` | Receives `(newValue, oldValue)`. `oldValue` is `nil` on immediate call. |
+| `opts` | `SubscribeOptions?` | Optional configuration |
 
-## `Store.Match(source, cases)`
+**`SubscribeOptions` fields:**
 
-Selects a case store based on the current value of `source`.
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Immediate` | `boolean?` | `true` | Call `listener` with the current value on subscribe |
+| `Deferred` | `boolean?` | `false` | Defer the immediate call via `Scheduler.Defer` |
 
-**Behavior**
+**Returns:** `Connection.Connection`
 
-- Reads `source:Get()` as a key into `cases`.
-- Falls back to `cases["_"]` if the key is absent.
-- Missing case during recompute routes through `ErrorHandler` phase `"Match"`.
+**Errors:**
+- `Store.Subscribe: store is destroyed`
+- `Store.Subscribe: listener must be a function`
+- `Store.Subscribe: opts must be a table or nil`
+- `Store.Subscribe: Immediate must be a boolean or nil`
+- `Store.Subscribe: Deferred must be a boolean or nil`
 
-## `Store.Readonly(store)`
+```luau
+-- Immediate (default): listener fires now with current value, then on changes.
+local conn = score:Subscribe(function(new, old)
+    print("score:", old, "→", new)
+end)
 
-Returns a read-only view of a writable store.
+-- No immediate call: only fires on actual changes.
+local conn2 = score:Subscribe(handler, { Immediate = false })
 
-**Behavior**
+-- Deferred immediate: current value arrives next frame.
+local conn3 = score:Subscribe(handler, { Deferred = true })
 
-- Readable methods delegate to source.
-- `Set`/`Update` are unavailable in the type and error dynamically.
-- Destroying the view disconnects view subscribers but does not destroy the source.
-- Destroying the source destroys the view.
-
-## `Store.IsStore(value)`
-
-Returns `true` for any store handle, including destroyed stores.
-
-## `Store.Batch(block)`
-
-Runs `block` and then flushes all pending notifications synchronously.
-
-**Behavior**
-
-- Reentrant mutations inside a flush are drained until no dirty stores remain.
-- If `block` errors, dirty writes remain applied; the error is re-thrown.
-
-## `Store.Transaction(block)`
-
-Same as `Batch` but defers the flush instead of running it synchronously.
-
-## `store:Get()`
-
-Returns current value.
-
-**Error behavior**
-
-```text
-Store.Get: store is destroyed
+conn:Disconnect()
 ```
 
-## `store:Peek()`
+---
 
-Currently identical to `Get`. Reserved for future untracked-read semantics.
+#### `handle:Changed()`
 
-## `store:Set(value)`
+Returns a `Signal<{ New: T, Old: T }>` that fires whenever the store changes. The signal is created lazily and shared — calling `Changed()` multiple times returns the same signal.
 
-Sets the store value immediately. Schedules a deferred notification flush unless inside a `Batch` or `Transaction`.
+**Returns:** `Signal.Signal<{ New: T, Old: T }>`
 
-**Error behavior**
-
-```text
-Store.Set: store is destroyed
-Store.Set: store is read-only
-Store.Set: only writable stores support Set
+```luau
+local sig = score:Changed()
+sig:Connect(function(evt)
+    print("changed from", evt.Old, "to", evt.New)
+end)
 ```
 
-**Behavior**
+---
 
-- If the new value equals the old value (by the store's equality function), no notification is issued.
+#### `handle:Map(picker, equals?)`
 
-## `store:Update(updater)`
+Shorthand for `Store.Select(self, picker, equals)`. Returns a new derived store.
 
-Calls `updater(currentValue)` and sets the returned value.
+---
 
-**Error behavior**
+#### `handle:Equals(eq)`
 
-```text
-Store.Update: updater must be a function
+Returns a new derived store that mirrors this one but uses `eq` as its equality function. Useful for adding deep equality to an existing store without reconstructing it.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `eq` | `(T, T) -> boolean` | Equality function |
+
+**Returns:** `ReadableStore<T>`
+
+---
+
+#### `handle:Name()`
+
+Returns the store's registered name, or `nil` if unnamed.
+
+**Returns:** `string?`
+
+---
+
+#### `handle:Deps()`
+
+Returns a clone of this store's dependency list. For non-derived stores, returns `{}`.
+
+**Returns:** `{ ReadableStore<any> }`
+
+---
+
+#### `handle:Wait()`
+
+Yields until the store's value changes, then returns `(newValue, oldValue)`. Throws if the store is destroyed while waiting.
+
+**Returns:** `(T, T)` — `(newValue, oldValue)`
+
+**Errors:**
+- `Store.Wait: store destroyed`
+- `Store.Wait: must be called from a yieldable coroutine`
+- `Store.Wait: store destroyed` — store was destroyed during the wait
+
+```luau
+local new, old = score:Wait()
 ```
 
-**Behavior**
+---
 
-- If `updater` errors, the store is not mutated.
+#### `handle:DisconnectAll()`
 
-## `store:Subscribe(listener, opts?)`
+Disconnects all subscribers. The store remains alive and can accept new subscribers.
 
-Registers a change listener.
+---
 
-**Options** (defaults: `Immediate = true`, `Deferred = false`)
+#### `handle:IsDestroyed()`
 
-- `Immediate = true, Deferred = false` — calls listener synchronously with `(currentValue, nil)` immediately.
-- `Immediate = true, Deferred = true` — schedules initial delivery through `Scheduler.Defer`.
-- `Immediate = false` — no initial delivery.
+Returns `true` if the store has been destroyed.
 
-**Behavior**
+**Returns:** `boolean`
 
-- Future notifications deliver `(newValue, oldValue)`.
-- Listener errors route through `ErrorHandler` phase `"Subscribe"`.
+---
 
-## `store:Changed()`
+#### `handle:Destroy()`
 
-Returns a lazily-created `Signal` that fires `{ New = T, Old = T }` after subscribers during each notification flush. Does not fire for initial Subscribe delivery.
+Destroys the store and all derived stores that depend on it. All subscriber connections are dropped; any `Wait` calls are unblocked with an error.
 
-## `store:Map(picker, equals?)`
+Idempotent.
 
-Shorthand for `Store.Select(store, picker, equals)`.
+---
 
-## `store:Equals(equals)`
+### Batch and Transaction
 
-Returns a derived store mirroring the value but using a different equality function.
+#### `Store.Batch(block)`
 
-## `store:Name()`
+Runs `block()` with subscriber notifications suppressed. All pending notifications are flushed synchronously when `block` returns. If `block` throws, the error is re-thrown and a flush still occurs for any changes that were made before the error.
 
-Returns the store name or `nil`. Destroyed stores return `nil`.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `block` | `() -> ()` | Runs multiple `Set` calls as one logical update |
 
-## `store:Deps()`
+**Errors:**
+- `Store.Batch: block must be a function`
+- Re-throws any error from `block`
 
-Returns a clone of the dependency array. Value and const stores return `{}`. Destroyed stores return `{}`.
-
-## `store:Wait()`
-
-Yields until the next actual changed notification.
-
-**Behavior**
-
-- Returns `(newValue, oldValue)`.
-- Does not return the current value immediately.
-- Must be called from a yieldable coroutine.
-- If the store is destroyed while waiting, errors:
-
-```text
-Store.Wait: store destroyed
+```luau
+Store.Batch(function()
+    score:Set(100)
+    health:Set(50)
+    name:Set("Alice")
+end)
+-- subscribers for score, health, name each receive one notification here
 ```
 
-## `store:DisconnectAll()`
+---
 
-Disconnects all subscribers. The store remains live. Changed signal listeners are not disconnected.
+#### `Store.Transaction(block)`
 
-## `store:Destroy()`
+Like `Batch`, but defers the flush to the next frame via `Scheduler.Defer`. Useful when you want multiple `Set` calls to coalesce even across synchronous call boundaries.
 
-Destroys the store.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `block` | `() -> ()` | Runs multiple `Set` calls |
 
-**Behavior** (in order)
+**Errors:**
+- `Store.Transaction: block must be a function`
+- Re-throws any error from `block`
 
-1. No-op if already destroyed.
-2. Mark destroyed.
-3. Recursively destroy derived consumers.
-4. Disconnect subscribers.
-5. Destroy changed signal if created.
-6. Remove named registry entry if owned by this store.
-7. Unlink from dependencies.
+---
 
-## `Store.Snapshot(...stores)`
+### Snapshot and Restore
 
-Captures current values of named stores.
+#### `Store.Snapshot(...)`
 
-**Behavior**
+Captures the current value of each named store into a plain table keyed by store name. Unnamed stores are keyed by their handle (but this key is not restorable).
 
-- Named stores use their names as keys.
-- Unnamed stores use internal keys not suitable for restore.
-- Values are shallow references.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `...` | `ReadableStore<any>` | Varargs; all must be live Stores |
 
-## `Store.Restore(snapshot, opts?)`
+**Returns:** `Snapshot` (`{ [string | any]: any }`)
 
-Restores named writable stores from a snapshot inside a `Transaction`.
+**Errors:**
+- `Store.Snapshot: all arguments must be live Stores`
 
-**Options**
+```luau
+local snap = Store.Snapshot(score, health, name)
+```
 
-- `Strict = false` (default) — ignores unknown, non-writable, destroyed, or malformed entries.
-- `Strict = true` — errors on those cases.
+---
 
-## `Store.History(store, limit?)`
+#### `Store.Restore(snapshot, opts?)`
 
-Creates an undo/redo manager.
+Restores named store values from a snapshot inside a `Transaction`. Unnamed or non-writable stores in the snapshot are silently skipped unless `Strict = true`.
 
-**Parameters**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `snapshot` | `Snapshot` | Previously captured snapshot |
+| `opts` | `{ Strict: boolean? }?` | If `Strict = true`, errors on unknown/destroyed/non-writable stores |
 
-- `store` — a live writable store.
-- `limit` — max history length. Default `100`.
+**Errors:**
+- `Store.Restore: opts must be a table or nil`
+- `Store.Restore: Strict must be a boolean or nil`
+- *(Strict mode only)* `Store.Restore: unknown store '{k}'`
+- *(Strict mode only)* `Store.Restore: store '{k}' is destroyed`
+- *(Strict mode only)* `Store.Restore: store '{k}' is not writable`
+- *(Strict mode only)* `Store.Restore: snapshot contains unnamed store entry which is not restorable`
 
-**Behavior**
+---
 
-- Tracks actual value changes (not the initial value).
-- `Undo()` sets the previous value, returns `true` if possible.
-- `Redo()` sets the next value, returns `true` if possible.
-- `Clear()` empties both stacks.
-- `Destroy()` disconnects the subscription and destroys `CanUndo`/`CanRedo`.
-- `CanUndo` and `CanRedo` are readable stores reflecting availability.
+### History
 
-## Flush semantics
+#### `Store.History(store, limit?)`
 
-| Context | Flush behavior |
-|---|---|
-| Normal `Set` | Deferred via `Scheduler.Defer` |
-| Inside `Batch` | Synchronous at outermost exit |
-| Inside `Transaction` | Deferred at outermost exit |
+Attaches undo/redo history to a writable store. Returns a `History` object.
 
-## Lifecycle behavior
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `store` | `WritableStore<T>` | Must be a live, writable Store |
+| `limit` | `number?` | Max undo stack depth; defaults to `100` |
 
-Destroying a derived store does not destroy its deps. Destroying a dep destroys all derived consumers recursively. Readonly views are destroyed when their source is destroyed.
+**Returns:** `History<T>`
 
-## Nil behavior
+**`History<T>` API:**
 
-Nil values are supported everywhere. Presence is tracked with a boolean flag, not by checking `value ~= nil`.
+| Member | Type | Description |
+|--------|------|-------------|
+| `CanUndo` | `ReadableStore<boolean>` | `true` when undo is available |
+| `CanRedo` | `ReadableStore<boolean>` | `true` when redo is available |
+| `Undo()` | `() -> boolean` | Undoes the last change; returns `false` if nothing to undo |
+| `Redo()` | `() -> boolean` | Redoes the last undone change; returns `false` if nothing to redo |
+| `Clear()` | `() -> ()` | Clears both undo and redo stacks |
+| `Destroy()` | `() -> ()` | Stops tracking; destroys `CanUndo`/`CanRedo` stores |
 
-## Scheduler behavior
+**Errors:**
+- `Store.History: store must be a writable live Store`
+- `Store.History: limit must be a positive integer or nil`
 
-Subscriber notifications are delivered through `Scheduler.Defer`. The `Changed` signal fires after subscribers in the same flush.
+```luau
+local text   = Store.Value("")
+local history = Store.History(text, 50)
 
-## Not implemented
+text:Set("Hello")
+text:Set("Hello World")
 
-Automatic dependency tracking is not implemented. All deps must be supplied explicitly to `Store.Derive`. Collection helpers and animation helpers are not part of this module.
+history:Undo()   -- text is now "Hello"
+history:Redo()   -- text is now "Hello World"
+history:Destroy()
+```
+
+---
+
+## Gotchas
+
+- **Notifications are deferred, not immediate.** When you call `Set`, subscribers are not called right away — they are collected and called on the next `Scheduler.Defer` flush. If you need to observe the new value immediately, call `Get()` directly.
+- **`Set` during a subscriber callback is safe.** The flush loop processes stores in waves; a `Set` made inside a subscriber schedules another flush wave, so all downstream updates are eventually consistent. However, infinite loops are possible if a subscriber unconditionally sets the same store.
+- **`Batch` flushes synchronously, `Transaction` defers.** Choose based on whether you need all subscribers to run before `Batch` returns (Batch) or whether you want to coalesce further sets that happen in the same frame (Transaction).
+- **Derived stores read current values, not old ones.** `compute()` in `Derive` always reads `dep:Get()` at the moment of recomputation, not the "before" value.
+- **`Store.Derive` initial compute runs synchronously.** If the initial `compute()` throws, `Store.Derive` throws too. There is no deferred recovery.
+- **Destroying a store destroys all derived stores downstream.** The entire consumer chain is torn down. Disconnect downstream subscriptions first if you want finer-grained cleanup.
+- **Named stores are global.** Two `Store.Value` calls with the same `Name` throw a duplicate error unless `ReplaceName = true`. Use `ReplaceName` only when you intentionally replace a singleton.
+- **`History` suppresses its own `Set` calls.** While `Undo`/`Redo` is applying a value, the subscriber is marked as suppressed so the operation does not push itself onto the undo stack.

@@ -87,7 +87,7 @@ function Scheduler.Defer(fn: () -> ()): any?
 end
 
 function Scheduler.Delay(seconds: number, fn: () -> ()): any?
-	if type(seconds) ~= "number" or seconds < 0 then
+	if type(seconds) ~= "number" or not (seconds >= 0) then
 		error("Scheduler.Delay: seconds must be non-negative")
 	end
 	if type(fn) ~= "function" then

@@ -140,18 +140,11 @@ local groupMeta = {
 local _tracer: ((TraceEvent) -> ())? = nil
 
 local function emitTrace(event: string, rec: TaskRecord)
-	if _tracer == nil then
-		return
-	end
+	if _tracer == nil then return end
 	local fn = _tracer :: (TraceEvent) -> ()
-	local ok, err = pcall(fn, {
-		Event = event,
-		Name = rec.Name,
-		Status = rec.Status,
-	})
-	if not ok then
-		ErrorHandler.Report({ Module = "Task", Phase = "Trace", Error = err })
-	end
+	ErrorHandler.Protect(function()
+		fn({ Event = event, Name = rec.Name, Status = rec.Status })
+	end, "Task", "Trace")
 end
 
 -- ── Internal helpers ──────────────────────────────────────────────────────────
@@ -205,10 +198,7 @@ local function runFinallyHandlers(taskHandle: any)
 	for _, entry in handlers do
 		local fn = entry.Fn
 		Scheduler.Defer(function()
-			local ok, err = pcall(fn, status, value)
-			if not ok then
-				ErrorHandler.Report({ Module = "Task", Phase = "Finally", Error = err })
-			end
+			ErrorHandler.Protect(function() fn(status, value) end, "Task", "Finally")
 		end)
 	end
 end
@@ -227,10 +217,7 @@ local function cancelToken(tokenHandle: any, reason: string?)
 			local fn = entry.Fn
 			local r = reason
 			Scheduler.Defer(function()
-				local ok, err = pcall(fn, r)
-				if not ok then
-					ErrorHandler.Report({ Module = "Task", Phase = "TokenCancel", Error = err })
-				end
+				ErrorHandler.Protect(function() fn(r) end, "Task", "TokenCancel")
 			end)
 		end
 	end
@@ -272,29 +259,41 @@ end
 local Task = {} :: any
 
 Task.Reason = table.freeze({
-	ModeExit = "ModeExit",
-	GuardFalse = "GuardFalse",
-	Superseded = "Superseded",
-	Timeout = "Timeout",
-	User = "User",
-	Shutdown = "Shutdown",
-	Capacity = "Capacity",
+	ModeExit = "ModeExit" :: "ModeExit",
+	GuardFalse = "GuardFalse" :: "GuardFalse",
+	Superseded = "Superseded" :: "Superseded",
+	Timeout = "Timeout" :: "Timeout",
+	User = "User" :: "User",
+	Shutdown = "Shutdown" :: "Shutdown",
+	Capacity = "Capacity" :: "Capacity",
+})
+
+Task.Status = table.freeze({
+	Pending = "Pending" :: "Pending",
+	Fulfilled = "Fulfilled" :: "Fulfilled",
+	Cancelled = "Cancelled" :: "Cancelled",
+	Errored = "Errored" :: "Errored",
+})
+
+Task.Backoff = table.freeze({
+	Fixed = "Fixed" :: "Fixed",
+	Expo = "Expo" :: "Expo",
 })
 
 -- ── Constructors ──────────────────────────────────────────────────────────────
 
-function Task.Start(fn: (token: Token) -> any, opts: TaskOptions?): any
-	if type(fn) ~= "function" then
-		error("Task.Start: fn must be a function", 2)
+local function spawnTask(taskFn: (token: Token) -> any, opts: TaskOptions?, callerName: string): any
+	if type(taskFn) ~= "function" then
+		error(callerName .. ": fn must be a function", 3)
 	end
 	if opts ~= nil and type(opts) ~= "table" then
-		error("Task.Start: opts must be a table or nil", 2)
+		error(callerName .. ": opts must be a table or nil", 3)
 	end
-	local name: string? = nil
+	local taskName: string? = nil
 	if opts ~= nil then
-		name = (opts :: any).Name
-		if name ~= nil and type(name) ~= "string" then
-			error("Task.Start: Name must be a string or nil", 2)
+		taskName = (opts :: any).Name
+		if taskName ~= nil and type(taskName) ~= "string" then
+			error(callerName .. ": Name must be a string or nil", 3)
 		end
 	end
 
@@ -314,14 +313,14 @@ function Task.Start(fn: (token: Token) -> any, opts: TaskOptions?): any
 		Reason = nil,
 		FinallyHandlers = {},
 		TokenHandle = tokenHandle,
-		Name = name,
+		Name = taskName,
 	}
 	local taskHandle = newTaskHandle(taskRec)
 
 	emitTrace("Start", taskRec)
 
 	Scheduler.Defer(function()
-		local co = coroutine.create(fn)
+		local co = coroutine.create(taskFn)
 		local ok, result = coroutine.resume(co, tokenHandle)
 		if ok then
 			settleTask(taskHandle, "Fulfilled", true, result, nil)
@@ -333,58 +332,12 @@ function Task.Start(fn: (token: Token) -> any, opts: TaskOptions?): any
 	return taskHandle
 end
 
-function Task.Defer(fn: (token: Token) -> any, opts: TaskOptions?): any
-	if type(fn) ~= "function" then
-		error("Task.Defer: fn must be a function", 2)
-	end
-	if opts ~= nil and type(opts) ~= "table" then
-		error("Task.Defer: opts must be a table or nil", 2)
-	end
-	local name: string? = nil
-	if opts ~= nil then
-		name = (opts :: any).Name
-		if name ~= nil and type(name) ~= "string" then
-			error("Task.Defer: Name must be a string or nil", 2)
-		end
-	end
-
-	local tokenRec: TokenRecord = {
-		Cancelled = false,
-		Reason = nil,
-		OnCancelHandlers = {},
-	}
-	local tokenHandle = newTokenHandle(tokenRec)
-
-	local taskRec: TaskRecord = {
-		Status = "Pending",
-		HasResult = false,
-		ResultValue = nil,
-		HasError = false,
-		ErrorValue = nil,
-		Reason = nil,
-		FinallyHandlers = {},
-		TokenHandle = tokenHandle,
-		Name = name,
-	}
-	local taskHandle = newTaskHandle(taskRec)
-
-	emitTrace("Start", taskRec)
-
-	Scheduler.Defer(function()
-		local co = coroutine.create(fn)
-		local ok, result = coroutine.resume(co, tokenHandle)
-		if ok then
-			settleTask(taskHandle, "Fulfilled", true, result, nil)
-		else
-			settleTask(taskHandle, "Errored", true, result, nil)
-		end
-	end)
-
-	return taskHandle
+function Task.Start(fn: (token: Token) -> any, opts: TaskOptions?): any
+	return spawnTask(fn, opts, "Task.Start")
 end
 
 function Task.Delay(seconds: number, fn: (() -> any)?): any
-	if type(seconds) ~= "number" or seconds < 0 then
+	if type(seconds) ~= "number" or not (seconds >= 0) then
 		error("Task.Delay: seconds must be non-negative", 2)
 	end
 	if fn ~= nil and type(fn) ~= "function" then
@@ -442,7 +395,7 @@ function Task.Delay(seconds: number, fn: (() -> any)?): any
 end
 
 function Task.Sleep(seconds: number, token: Token?): (boolean, string?)
-	if type(seconds) ~= "number" or seconds < 0 then
+	if type(seconds) ~= "number" or not (seconds >= 0) then
 		error("Task.Sleep: seconds must be non-negative", 2)
 	end
 	if token ~= nil and not isTokenHandle(token) then
@@ -648,10 +601,10 @@ function Task.Retry(makeTask: (token: Token) -> any, opts: RetryOptions): any
 	if backoff ~= "Fixed" and backoff ~= "Expo" then
 		error("Task.Retry: Backoff must be 'Fixed' or 'Expo'", 2)
 	end
-	if type(base) ~= "number" or base < 0 then
+	if type(base) ~= "number" or not (base >= 0) then
 		error("Task.Retry: Base must be >= 0", 2)
 	end
-	if jitter ~= nil and (type(jitter) ~= "number" or jitter < 0) then
+	if jitter ~= nil and (type(jitter) ~= "number" or not (jitter >= 0)) then
 		error("Task.Retry: Jitter must be >= 0 or nil", 2)
 	end
 	if type(makeTask) ~= "function" then
@@ -1184,10 +1137,7 @@ function taskMethods:Finally(fn: (status: Status, value: unknown?) -> ()): any
 			value = rec.Reason
 		end
 		Scheduler.Defer(function()
-			local ok, err = pcall(fn, status, value)
-			if not ok then
-				ErrorHandler.Report({ Module = "Task", Phase = "Finally", Error = err })
-			end
+			ErrorHandler.Protect(function() fn(status, value) end, "Task", "Finally")
 		end)
 	end
 	return self
@@ -1323,10 +1273,7 @@ function tokenMethods:OnCancel(fn: (reason: string?) -> ()): Connection.Connecti
 	if rec.Cancelled then
 		local r = rec.Reason
 		Scheduler.Defer(function()
-			local ok, err = pcall(fn, r)
-			if not ok then
-				ErrorHandler.Report({ Module = "Task", Phase = "TokenCancel", Error = err })
-			end
+			ErrorHandler.Protect(function() fn(r) end, "Task", "TokenCancel")
 		end)
 		local conn = Connection.New(function() end)
 		conn:Disconnect()

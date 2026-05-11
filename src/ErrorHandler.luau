@@ -12,6 +12,14 @@ export type ErrorInfo = {
 	Error: unknown,
 }
 
+-- Enum table: users reference ErrorHandler.Policy.Throw etc. instead of raw strings.
+local _policyEnum = table.freeze({
+	Throw = "Throw" :: "Throw",
+	Warn = "Warn" :: "Warn",
+	Swallow = "Swallow" :: "Swallow",
+	Collect = "Collect" :: "Collect",
+})
+
 local VALID_POLICIES: { [string]: boolean } = {
 	Throw = true,
 	Warn = true,
@@ -35,9 +43,8 @@ local function buildMessage(info: ErrorInfo): string
 end
 
 function ErrorHandler.SetPolicy(policy: Policy): ()
-	local raw: any = policy
-	if VALID_POLICIES[raw] ~= true then
-		error(`ErrorHandler.SetPolicy: invalid policy '{tostring(raw)}'`)
+	if VALID_POLICIES[policy] ~= true then
+		error(`ErrorHandler.SetPolicy: invalid policy '{tostring(policy)}'`)
 	end
 	_policy = policy
 end
@@ -54,23 +61,32 @@ function ErrorHandler.SetReporter(fn: ((ErrorInfo) -> ())?): ()
 end
 
 function ErrorHandler.Report(info: ErrorInfo): ()
-	local raw: any = info
-	if type(raw) ~= "table" then
+	-- Cast to untyped map for runtime validation: callers may bypass the type checker.
+	local untyped = info :: { [string]: unknown }
+	if type(untyped) ~= "table" then
 		error("ErrorHandler.Report: info must be a table")
 	end
-	if type(raw.Phase) ~= "string" then
+	if type(untyped.Phase) ~= "string" then
 		error("ErrorHandler.Report: Phase must be a string")
 	end
-	if type(raw.Module) ~= "string" then
+	if type(untyped.Module) ~= "string" then
 		error("ErrorHandler.Report: Module must be a string")
 	end
-	if rawget(raw, "Error") == nil then
+	-- Iterate keys to distinguish "Error key absent" from "Error = nil" (rawget cannot).
+	local hasErrorKey = false
+	for k in untyped do
+		if k == "Error" then
+			hasErrorKey = true
+			break
+		end
+	end
+	if not hasErrorKey then
 		error("ErrorHandler.Report: Error is required")
 	end
-	if raw.Name ~= nil and type(raw.Name) ~= "string" then
+	if untyped.Name ~= nil and type(untyped.Name) ~= "string" then
 		error("ErrorHandler.Report: Name must be a string or nil")
 	end
-	if raw.Message ~= nil and type(raw.Message) ~= "string" then
+	if untyped.Message ~= nil and type(untyped.Message) ~= "string" then
 		error("ErrorHandler.Report: Message must be a string or nil")
 	end
 
@@ -95,10 +111,23 @@ function ErrorHandler.Report(info: ErrorInfo): ()
 	-- "Swallow": nothing after reporter
 end
 
+-- Runs fn(); if it errors, routes through Report and returns (false, err).
+-- Returns (true, result) on success. Useful when the return value matters.
+function ErrorHandler.Protect(fn: () -> any, module: string, phase: string, name: string?): (boolean, any)
+	local ok, result = pcall(fn)
+	if not ok then
+		ErrorHandler.Report({ Module = module, Phase = phase, Name = name, Error = result })
+		return false, result
+	end
+	return true, result
+end
+
 function ErrorHandler.TakeCollected(): { ErrorInfo }
 	local result = _collected
 	_collected = {}
 	return result
 end
+
+ErrorHandler.Policy = _policyEnum
 
 return ErrorHandler

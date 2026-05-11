@@ -195,21 +195,13 @@ local modeRecords: { [any]: ModeRecord } = setmetatable({}, { __mode = "k" } :: 
 local _tracer: ((any) -> ())? = nil
 
 local function emitTrace(event: string, fsmRec: FSMRecord, extra: { [string]: any }?)
-	if not fsmRec.Policy.Trace and _tracer == nil then return end
 	if _tracer == nil then return end
-	local payload: { [string]: any } = {
-		Event = event,
-		Tag = fsmRec.Policy.Tag,
-	}
+	local fn = _tracer :: (any) -> ()
+	local payload: { [string]: any } = { Event = event, Tag = fsmRec.Policy.Tag }
 	if extra then
-		for k, v in extra do
-			payload[k] = v
-		end
+		for k, v in extra do payload[k] = v end
 	end
-	local ok, err = pcall(_tracer :: any, payload)
-	if not ok then
-		ErrorHandler.Report({ Module = "FSM", Phase = "Trace", Error = err })
-	end
+	ErrorHandler.Protect(function() fn(payload) end, "FSM", "Trace")
 end
 
 -- ── Metatables ────────────────────────────────────────────────────────────────
@@ -312,15 +304,9 @@ local function getModeParentName(fsmRec: FSMRecord, modeRec: ModeRecord): string
 		return if parentRec ~= nil then parentRec.RegistryName else nil
 	end
 	local name = modeRec.RegistryName
-	local lastDot: number? = nil
-	for i = #name, 1, -1 do
-		if string.sub(name, i, i) == "." then
-			lastDot = i
-			break
-		end
-	end
-	if lastDot ~= nil then
-		local possibleParent = string.sub(name, 1, lastDot - 1)
+	local dotPos = string.find(name, "%.[^%.]*$")
+	if dotPos ~= nil then
+		local possibleParent = string.sub(name, 1, dotPos - 1)
 		if fsmRec.Modes[possibleParent] ~= nil then
 			return possibleParent
 		end
@@ -443,10 +429,7 @@ local function exitMode(fsmRec: FSMRecord, modeHandle: any, frame: TransitionFra
 			handleFSMError(fsmRec, "Exit", result)
 		else
 			if type(result) == "function" then
-				local ok2, err2 = pcall(result :: () -> ())
-				if not ok2 then
-					ErrorHandler.Report({ Module = "FSM", Phase = "ExitDisposer", Error = err2 })
-				end
+				ErrorHandler.Protect(result :: () -> (), "FSM", "ExitDisposer")
 			elseif Task.IsTask(result) then
 				ErrorHandler.Report({ Module = "FSM", Phase = "ExitTaskIgnored", Error = "OnExit returned a Task; async exit is not supported" })
 			end
@@ -455,10 +438,7 @@ local function exitMode(fsmRec: FSMRecord, modeHandle: any, frame: TransitionFra
 
 	-- 4. Run active disposers
 	for _, d in modeRec.ActiveDisposers do
-		local ok, err = pcall(d)
-		if not ok then
-			ErrorHandler.Report({ Module = "FSM", Phase = "ExitDisposer", Error = err })
-		end
+		ErrorHandler.Protect(d, "FSM", "ExitDisposer")
 	end
 	table.clear(modeRec.ActiveDisposers)
 
@@ -519,7 +499,7 @@ local function enterMode(fsmHandle: any, fsmRec: FSMRecord, modeHandle: any, fra
 
 	local modeCtx = fsmRec.CtxHandle:Layer(providerValues, if #providerCleanups > 0 then function()
 		for _, c in providerCleanups do
-			pcall(c)
+			ErrorHandler.Protect(c, "FSM", "ProvideCleanup")
 		end
 	end else nil)
 	modeRec.ActiveCtx = modeCtx
@@ -543,10 +523,8 @@ local function enterMode(fsmHandle: any, fsmRec: FSMRecord, modeHandle: any, fra
 
 	-- Factory resources
 	for _, factory in modeRec.AddedFactories do
-		local ok, result = pcall(factory, modeCtx, frame)
-		if not ok then
-			ErrorHandler.Report({ Module = "FSM", Phase = "Factory", Error = result })
-		else
+		local ok, result = ErrorHandler.Protect(function() return factory(modeCtx, frame) end, "FSM", "Factory")
+		if ok then
 			if type(result) == "function" then
 				table.insert(modeRec.ActiveDisposers, result :: () -> ())
 			elseif Task.IsTask(result) then
@@ -569,17 +547,14 @@ local function enterMode(fsmHandle: any, fsmRec: FSMRecord, modeHandle: any, fra
 	for _, updateFn in modeRec.OnUpdateFns do
 		local fn = updateFn
 		local updateFrame: UpdateFrame = { Mode = modeRec.RegistryName, StartedAt = startedAt }
-		local ok, conn = pcall(Scheduler.OnStep, function(dt: number)
-			if modeRec.ActiveCtx == nil then return end
-			local ok2, err2 = pcall(fn, modeCtx, dt, updateFrame)
-			if not ok2 then
-				ErrorHandler.Report({ Module = "FSM", Phase = "Update", Error = err2 })
-			end
-		end)
+		local ok, conn = ErrorHandler.Protect(function()
+			return Scheduler.OnStep(function(dt: number)
+				if modeRec.ActiveCtx == nil then return end
+				ErrorHandler.Protect(function() fn(modeCtx, dt, updateFrame) end, "FSM", "Update")
+			end)
+		end, "FSM", "Update")
 		if ok then
 			table.insert(modeRec.UpdateConns, conn :: Connection.Connection)
-		else
-			ErrorHandler.Report({ Module = "FSM", Phase = "Update", Error = "FSM.OnUpdate: no update driver available" })
 		end
 	end
 
@@ -613,7 +588,7 @@ local function enterMode(fsmHandle: any, fsmRec: FSMRecord, modeHandle: any, fra
 	end)
 
 	for _, g in fnGuards do
-		local ok, result = pcall(g.GuardValue, modeCtx, frame)
+		local ok, result = ErrorHandler.Protect(function() return g.GuardValue(modeCtx, frame) end, "FSM", "Guard")
 		if ok and result == true then
 			local guardEntry = g
 			if guardEntry.Defer then
@@ -906,6 +881,22 @@ function fsmMethods:Start(name: string): ()
 	end
 	if rec.Modes[name] == nil then
 		error("FSM.Start: mode '" .. name .. "' not registered", 2)
+	end
+
+	-- Validate all guard targets reference registered modes.
+	for modeName, modeHandle in rec.Modes do
+		local modeRec = modeRecords[modeHandle]
+		if modeRec ~= nil then
+			for _, guardEntry in modeRec.Guards do
+				if rec.Modes[guardEntry.To] == nil then
+					error(
+						"FSM.Start: guard in mode '" .. modeName
+						.. "' targets unregistered mode '" .. guardEntry.To .. "'",
+						2
+					)
+				end
+			end
+		end
 	end
 
 	rec.Started = true
@@ -1325,10 +1316,8 @@ function modeMethods:Add(resource: any): any
 				StartedAt = rec.ActiveStartedAt or Scheduler.Now(),
 				Immediate = true,
 			}
-			local ok, result = pcall(resource, rec.ActiveCtx, fakeFrame)
-			if not ok then
-				ErrorHandler.Report({ Module = "FSM", Phase = "Factory", Error = result })
-			else
+			local ok, result = ErrorHandler.Protect(function() return resource(rec.ActiveCtx, fakeFrame) end, "FSM", "Factory")
+			if ok then
 				if type(result) == "function" then
 					table.insert(rec.ActiveDisposers, result :: () -> ())
 				elseif Task.IsTask(result) then
@@ -1468,5 +1457,16 @@ function modeMethods:Destroy(): ()
 
 	rec.Destroyed = true
 end
+
+-- Enum tables: use FSM.ExitOrdering.LeafFirst etc. instead of raw strings in Policy.
+FSM.ExitOrdering = table.freeze({
+	LeafFirst = "LeafFirst" :: "LeafFirst",
+	ParentFirst = "ParentFirst" :: "ParentFirst",
+})
+
+FSM.Deferral = table.freeze({
+	Queue = "Queue" :: "Queue",
+	Drop = "Drop" :: "Drop",
+})
 
 return FSM

@@ -18,7 +18,6 @@ export type Context<T> = {
 	Provide: (self: Context<T>, values: { [any]: any }) -> (),
 	ProvideLazy: <V>(self: Context<T>, key: ContextKey<V> | string, provider: (Context<any>) -> V) -> (),
 	Layer: <L>(self: Context<T>, values: L, cleanup: (() -> ())?) -> Context<L>,
-	Pick: (self: Context<T>, keys: { any }) -> Context<any>,
 	View: (self: Context<T>, keys: { any }) -> Context<any>,
 	Readonly: (self: Context<T>) -> Context<T>,
 	Destroy: (self: Context<T>) -> (),
@@ -112,15 +111,9 @@ local function findKey(callerHandle: any, handle: any, key: any): (boolean, any)
 			error(`Context.Require: lazy provider cycle for key '{keyDisplayName(key)}'`)
 		end
 		lazy.Resolving = true
-		local ok, result = pcall(lazy.Provider :: any, callerHandle)
+		local ok, result = ErrorHandler.Protect(function() return lazy.Provider(callerHandle) end, "Context", "LazyProvider", keyDisplayName(key))
 		lazy.Resolving = false
 		if not ok then
-			ErrorHandler.Report({
-				Module = "Context",
-				Phase = "LazyProvider",
-				Name = keyDisplayName(key),
-				Error = result,
-			})
 			-- Reached only when policy is not Throw; Report did not propagate.
 			error(`Context.Require: lazy provider failed for key '{keyDisplayName(key)}'`)
 		end
@@ -189,14 +182,7 @@ local function destroyHandle(handle: any): ()
 		local cleanup = record.Cleanup
 		record.Cleanup = nil
 		if cleanup ~= nil then
-			local ok, err = pcall(cleanup)
-			if not ok then
-				ErrorHandler.Report({
-					Module = "Context",
-					Phase = "Destroy",
-					Error = err,
-				})
-			end
+			ErrorHandler.Protect(cleanup, "Context", "Destroy")
 		end
 	end
 
@@ -204,14 +190,7 @@ local function destroyHandle(handle: any): ()
 	local callbacksCopy = table.clone(record.OnDestroyCallbacks)
 	table.clear(record.OnDestroyCallbacks)
 	for _, entry in callbacksCopy do
-		local ok, err = pcall(entry.Fn)
-		if not ok then
-			ErrorHandler.Report({
-				Module = "Context",
-				Phase = "OnDestroy",
-				Error = err,
-			})
-		end
+		ErrorHandler.Protect(entry.Fn, "Context", "OnDestroy")
 	end
 
 	-- Release storage for non-views (views have no storage).
@@ -419,18 +398,18 @@ contextMethods.Layer = function(self: any, values: any, cleanup: any): any
 	return childHandle
 end
 
-contextMethods.Pick = function(self: any, keys: any): any
+contextMethods.View = function(self: any, keys: any): any
 	local record: ContextRecord? = contextRecords[self]
 	if record == nil or record.Destroyed then
-		error("Context.Pick: context is destroyed")
+		error("Context.View: context is destroyed")
 	end
 	if type(keys) ~= "table" then
-		error("Context.Pick: keys must be an array")
+		error("Context.View: keys must be an array")
 	end
 	local visibleKeys: { [any]: true } = {}
-	for _, k in ipairs(keys :: { any }) do
+	for _, k in ipairs(keys) do
 		if not isValidKey(k) then
-			error("Context.Pick: key must be a ContextKey or non-empty string")
+			error("Context.View: key must be a ContextKey or non-empty string")
 		end
 		visibleKeys[k] = true
 	end
@@ -442,8 +421,6 @@ contextMethods.Pick = function(self: any, keys: any): any
 	table.insert(record.Children, viewHandle)
 	return viewHandle
 end
-
-contextMethods.View = contextMethods.Pick
 
 contextMethods.Readonly = function(self: any): any
 	local record: ContextRecord? = contextRecords[self]

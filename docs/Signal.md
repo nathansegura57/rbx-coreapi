@@ -1,323 +1,626 @@
 # Signal
 
-## Purpose
+A reactive event stream. Signals are the fundamental push-based primitive in CoreAPI: fire a value, every connected listener receives it. Operators return new derived signals, enabling composable pipelines without mutation.
 
-`Signal` is a typed event emitter with synchronous delivery, re-entrancy safety, optional replay, and a suite of combinators.
+---
 
-## Import
+## API Reference
 
-```luau
-local Signal = require(path.to.Signal)
-```
+### Constructors
 
-## Public API reference
+#### `Signal.New()`
 
-```luau
-Signal.New<T>(): Signal.Signal<T>
-Signal.Never<T>(): Signal.Signal<T>
-Signal.After<T>(seconds: number): Signal.Signal<T>
-Signal.Every<T>(seconds: number): Signal.Signal<T>
-Signal.FromRoblox<T>(rbxSignal: RBXScriptSignal): Signal.Signal<T>
-Signal.Merge<T>(signals: { Signal.Signal<T> }): Signal.Signal<T>
-Signal.Zip(signals: { Signal.Signal<any> }): Signal.Signal<{ any }>
-Signal.Race<T>(signals: { Signal.Signal<T> }): Signal.Signal<T>
-Signal.Sequence(signals: { Signal.Signal<any> }, opts: SequenceOptions?): Signal.Signal<{ any }>
-Signal.IsSignal(value: unknown): boolean
-```
+Creates a new writable signal.
 
-## Instance methods
+**Returns:** `Signal<unknown>`
 
 ```luau
-signal:Connect(fn: (payload: T) -> ()): Connection.Connection
-signal:Once(fn: (payload: T) -> ()): Connection.Connection
-signal:Fire(payload: T): ()
-signal:Wait(): T
-signal:DisconnectAll(): ()
-signal:Destroy(): ()
-signal:IsDestroyed(): boolean
-signal:ReplayCount(count: number): Signal.Signal<T>
-signal:ReplayTime(seconds: number): Signal.Signal<T>
-signal:BufferCount(count: number): Signal.Signal<T>
-signal:BufferTime(seconds: number): Signal.Signal<T>
-signal:Debounce(seconds: number): Signal.Signal<T>
-signal:Throttle(seconds: number): Signal.Signal<T>
-signal:Map<U>(fn: (T) -> U): Signal.Signal<U>
-signal:Filter(fn: (T) -> boolean): Signal.Signal<T>
-signal:Reduce<U>(fn: (U, T) -> U, initial: U): Signal.Signal<U>
-signal:Tap(fn: (T) -> ()): Signal.Signal<T>
-signal:Skip(count: number): Signal.Signal<T>
-signal:Take(count: number): Signal.Signal<T>
-signal:Distinct(): Signal.Signal<T>
-signal:DistinctUntilChanged(equals: ((T, T) -> boolean)?): Signal.Signal<T>
+local onDamage = Signal.New()
+onDamage:Connect(function(amount) print("took", amount, "damage") end)
+onDamage:Fire(50)  -- prints: took 50 damage
 ```
 
-## Types
+---
+
+#### `Signal.Never()`
+
+Creates a signal that can never be fired. Useful as a placeholder or disabled event source.
+
+**Returns:** `Signal<never>`
+
+**Errors if fired:**
+- `Signal.Fire: cannot fire a never signal`
+
+---
+
+#### `Signal.After(seconds)`
+
+Creates a signal that fires once after `seconds` seconds, then destroys itself.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `seconds` | `number` | Delay; must be `>= 0` |
+
+**Returns:** `Signal<nil>`
+
+**Errors:**
+- `Signal.After: seconds must be non-negative`
 
 ```luau
-export type Signal<T> = {
-    Connect: (self: Signal<T>, fn: (payload: T) -> ()) -> Connection.Connection,
-    Once: (self: Signal<T>, fn: (payload: T) -> ()) -> Connection.Connection,
-    Fire: (self: Signal<T>, payload: T) -> (),
-    Wait: (self: Signal<T>) -> T,
-    DisconnectAll: (self: Signal<T>) -> (),
-    Destroy: (self: Signal<T>) -> (),
-    IsDestroyed: (self: Signal<T>) -> boolean,
-    ReplayCount: (self: Signal<T>, count: number) -> Signal<T>,
-    ReplayTime: (self: Signal<T>, seconds: number) -> Signal<T>,
-    ...
-}
-
-export type SequenceOptions = {
-    Timeout: number?,
-    ResetOnTimeout: boolean?,
-}
+local alarm = Signal.After(5)
+alarm:Connect(function() print("5 seconds elapsed") end)
 ```
 
-## `Signal.New()`
+---
 
-Creates a standard signal. Payloads may be any value including nil.
+#### `Signal.Every(seconds)`
 
-## `Signal.Never()`
+Creates a signal that fires every `seconds` seconds indefinitely until destroyed.
 
-Creates a signal that never fires. Connecting returns a connection that is never called.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `seconds` | `number` | Interval; must be `> 0` |
 
-## `Signal.After(seconds)`
+**Returns:** `Signal<nil>`
 
-Creates a signal that fires once after `seconds`.
-
-**Error behavior**
-
-```text
-Signal.After: seconds must be non-negative
-```
-
-## `Signal.Every(seconds)`
-
-Creates a signal that fires repeatedly every `seconds`.
-
-**Error behavior**
-
-```text
-Signal.Every: seconds must be positive
-```
-
-**Behavior**
-
-- Fires indefinitely until destroyed.
-- Timer is scheduled through `Scheduler`.
-
-## `Signal.FromRoblox(rbxSignal)`
-
-Wraps an `RBXScriptSignal`. Each Roblox event fires this signal with the same arguments packed into a table `{ ..., n = count }`.
-
-**Error behavior**
-
-```text
-Signal.FromRoblox: rbxSignal must be an RBXScriptSignal
-```
-
-## `Signal.Merge(signals)`
-
-Fires whenever any source signal fires. Output payload is the source payload.
-
-**Error behavior**
-
-```text
-Signal.Merge: signals must be a non-empty dense array of Signals
-```
-
-**Behavior**
-
-- Destroying any source destroys the merged signal.
-
-## `Signal.Zip(signals)`
-
-Fires when all sources have fired at least once since the last zip. Output is an array of one payload per source in order.
-
-**Nil behavior**
-
-Nil payloads are tracked with presence flags. A nil payload from source `i` counts as slot `i` filled.
-
-## `Signal.Race(signals)`
-
-Fires once with the payload from the first source that fires.
-
-**Behavior**
-
-- After the first fire, the signal fires no further events.
-- Destroying any source destroys the race signal.
-
-## `Signal.Sequence(signals, opts?)`
-
-Fires once when sources fire in order within optional timeout windows.
-
-**Options**
+**Errors:**
+- `Signal.Every: seconds must be positive`
 
 ```luau
-{
-    Timeout: number?,      -- seconds per step
-    ResetOnTimeout: boolean?,
-}
+local ticker = Signal.Every(1)
+ticker:Connect(function() print("tick") end)
+-- later:
+ticker:Destroy()
 ```
 
-**Behavior**
+---
 
-- Requires sources to fire in index order.
-- If `Timeout` is set and a step times out: resets to step 1 if `ResetOnTimeout` is true, else remains at step 1.
+#### `Signal.FromRoblox(rbxSignal, mapper?)`
 
-## `Signal.IsSignal(value)`
+Wraps a `RBXScriptSignal`. If `mapper` is provided, its return value becomes the payload; errors from `mapper` are routed through `ErrorHandler` and the fire is skipped. Without a mapper, the payload is `table.pack(...)` of the raw Roblox arguments.
 
-Returns `true` for any Signal handle, including destroyed signals.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `rbxSignal` | `RBXScriptSignal` | The Roblox signal to bridge |
+| `mapper` | `((...any) -> any)?` | Optional transform applied to the raw args |
 
-## `signal:Connect(fn)`
+**Returns:** `Signal<any>`
 
-Registers a listener.
+**Errors:**
+- `Signal.FromRoblox: expected RBXScriptSignal`
+- `Signal.FromRoblox: mapper must be a function or nil`
 
-**Behavior**
+```luau
+-- Without mapper: payload is table.pack(...)
+local onTouch = Signal.FromRoblox(part.Touched)
+onTouch:Connect(function(args) print(args[1].Name) end)
 
-- Listeners fire in connection order.
-- Listener errors route through `ErrorHandler` with phase `"Signal"`.
-- Returns a `Connection`.
-
-**Error behavior**
-
-```text
-Signal.Connect: fn must be a function
-Signal.Connect: signal is destroyed
+-- With mapper: payload is the mapped value
+local onHumanoidDied = Signal.FromRoblox(humanoid.Died, function()
+    return os.clock()
+end)
 ```
 
-## `signal:Once(fn)`
+---
 
-Registers a listener that disconnects itself after first invocation.
+#### `Signal.IsSignal(value)`
 
-## `signal:Fire(payload)`
+Returns `true` if `value` is a live Signal handle.
 
-Fires all current listeners synchronously with `payload`.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `value` | `unknown` | Any value |
 
-**Behavior**
+**Returns:** `boolean`
 
-- Listeners added during a fire are not called for that fire.
-- Disconnections during a fire are respected; disconnected listeners are skipped.
-- Nil payloads are supported.
+---
 
-**Error behavior**
+### Replay Policies
 
-```text
-Signal.Fire: signal is destroyed
+Replay causes newly connected listeners to receive past events immediately (deferred via `Scheduler.Defer`). At most one replay policy may be set per signal.
+
+#### `Signal.ReplayPolicy`
+
+```luau
+Signal.ReplayPolicy.Count  -- replay the last N events
+Signal.ReplayPolicy.Time   -- replay events from the past N seconds
 ```
 
-## `signal:Wait()`
+---
 
-Yields the calling coroutine until the next fire.
+#### `handle:ReplayCount(count)`
 
-**Behavior**
+Replays the last `count` events to each new subscriber.
 
-- Returns the payload from the next fire.
-- Must be called from a yieldable coroutine.
-- If the signal is destroyed while waiting, errors:
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `count` | `number` | Positive integer |
 
-```text
-Signal.Wait: signal destroyed
+**Returns:** `self` (for chaining)
+
+**Errors:**
+- `Signal.ReplayCount: count must be a positive integer`
+- `Signal.ReplayCount: signal is destroyed`
+- `Signal: only one replay policy may be applied`
+
+```luau
+local recent = Signal.New()
+recent:ReplayCount(3)  -- new listeners get up to 3 past events
 ```
 
-## `signal:DisconnectAll()`
+---
 
-Disconnects all listeners. The signal remains live and can accept new connections.
+#### `handle:ReplayTime(seconds)`
 
-## `signal:Destroy()`
+Replays events that occurred within the last `seconds` seconds to each new subscriber.
 
-Permanently destroys the signal.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `seconds` | `number` | Must be `> 0` |
 
-**Behavior**
+**Returns:** `self`
 
-- All listeners are disconnected.
-- Pending `Wait` calls receive a destroy error.
-- Replay buffers are cleared.
-- Derived signals are destroyed.
-- Idempotent.
+**Errors:**
+- `Signal.ReplayTime: seconds must be positive`
+- `Signal.ReplayTime: signal is destroyed`
+- `Signal: only one replay policy may be applied`
 
-## `signal:IsDestroyed()`
+---
 
-Returns `true` after `Destroy`.
+#### `handle:ClearReplay()`
 
-## Replay policies
+Clears the replay buffer and removes the replay policy from this signal.
 
-### `signal:ReplayCount(count)`
+**Returns:** `self`
 
-On new connection, delivers the last `count` buffered payloads immediately.
+---
 
-**Error behavior**
+### Instance Methods
 
-```text
-Signal: count must be a positive integer
-Signal: only one replay policy may be applied
+#### `handle:Connect(listener)`
+
+Subscribes `listener` to receive payloads. Errors from `listener` are routed through `ErrorHandler`.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `listener` | `(T) -> ()` | Called on each fire |
+
+**Returns:** `Connection.Connection`
+
+**Errors:**
+- `Signal.Connect: signal is destroyed`
+- `Signal.Connect: listener must be a function`
+
+```luau
+local conn = signal:Connect(function(value)
+    print("received:", value)
+end)
+conn:Disconnect()
 ```
 
-### `signal:ReplayTime(seconds)`
+---
 
-On new connection, delivers all buffered payloads from the last `seconds`.
+#### `handle:Once(listener)`
 
-**Error behavior**
+Like `Connect`, but disconnects automatically after the first fire.
 
-```text
-Signal: seconds must be positive
-Signal: only one replay policy may be applied
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `listener` | `(T) -> ()` | Called once |
+
+**Returns:** `Connection.Connection`
+
+**Errors:**
+- `Signal.Once: signal is destroyed`
+- `Signal.Once: listener must be a function`
+
+```luau
+signal:Once(function(v)
+    print("first fire only:", v)
+end)
 ```
 
-## Operators
+---
 
-### `signal:Debounce(seconds)`
+#### `handle:Fire(payload)`
 
-Returns a derived signal that fires only after `seconds` of silence. Each payload resets the timer.
+Fires the signal, calling all connected listeners synchronously.
 
-### `signal:Throttle(seconds)`
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `payload` | `T` | Any value, including `nil` |
 
-Returns a derived signal that fires at most once per `seconds` window.
+**Errors:**
+- `Signal.Fire: cannot fire a never signal`
 
-### `signal:Map(fn)`
+---
 
-Returns a derived signal with payloads transformed by `fn`.
+#### `handle:Wait()`
 
-### `signal:Filter(fn)`
+Yields the current coroutine until the signal fires once, then returns the payload. If the signal is destroyed while waiting, throws.
 
-Returns a derived signal that only fires when `fn(payload) == true`.
+**Returns:** `T`
 
-### `signal:Reduce(fn, initial)`
+**Errors:**
+- `Signal.Wait: signal is destroyed`
+- `Signal.Wait: must be called from a yieldable coroutine`
+- `Signal.Wait: signal destroyed` — signal was destroyed during the wait
 
-Returns a derived signal that accumulates a running value. Fires the accumulated value on each source fire.
+```luau
+-- Inside a Task coroutine:
+local value = signal:Wait()
+```
 
-### `signal:Tap(fn)`
+---
 
-Returns a derived signal that calls `fn` as a side effect then passes through the payload unchanged.
+#### `handle:DisconnectAll()`
 
-### `signal:Skip(count)`
+Disconnects all listeners without destroying the signal. New connections may still be added afterward.
 
-Returns a derived signal that ignores the first `count` fires.
+---
 
-### `signal:Take(count)`
+#### `handle:Destroy()`
 
-Returns a derived signal that fires at most `count` times then destroys itself.
+Destroys the signal. All listeners are disconnected; any `Wait` calls are resumed with an error. Derived signals registered via `connectDerived` are also destroyed.
 
-### `signal:Distinct()`
+Idempotent — safe to call multiple times.
 
-Returns a derived signal that skips consecutive duplicate payloads by identity (`==`).
+---
 
-### `signal:DistinctUntilChanged(equals?)`
+#### `handle:IsDestroyed()`
 
-Returns a derived signal using a custom equality function.
+Returns `true` if the signal has been destroyed.
 
-## Lifecycle behavior
+**Returns:** `boolean`
 
-Destroying a source signal destroys all derived signals built from it. Destroying a derived signal disconnects it from the source but does not destroy the source.
+---
 
-## Nil behavior
+### Operators
 
-All APIs support nil payloads. Buffer entries use presence wrappers internally so nil does not truncate array length.
+All operators return a **new derived signal** that is automatically destroyed when the source signal is destroyed.
 
-## Scheduler behavior
+---
 
-`Signal.After`, `Signal.Every`, debounce, and throttle operators use `Scheduler.Delay` and `Scheduler.Defer`.
+#### `handle:Map(mapper)`
 
-## Not implemented
+Transforms each payload through `mapper`. Errors from `mapper` are routed through `ErrorHandler`; the event is skipped on error.
 
-`Signal.Never` signals never fire. `Signal.Race` fires once and never again. These behaviors are intentional.
+```luau
+local doubled = numbers:Map(function(n) return n * 2 end)
+```
+
+---
+
+#### `handle:Filter(predicate)`
+
+Only forwards payloads where `predicate` returns `true`. Errors skip the event.
+
+```luau
+local positive = numbers:Filter(function(n) return n > 0 end)
+```
+
+---
+
+#### `handle:Scan(reducer, seed)`
+
+Accumulates payloads using `reducer(accumulator, payload) -> newAccumulator`. The derived signal emits the running accumulator after each event.
+
+```luau
+local sum = numbers:Scan(function(acc, n) return acc + n end, 0)
+```
+
+---
+
+#### `handle:MergeMap(selector)`
+
+For each payload, calls `selector` to produce an inner Signal. Events from all active inner signals are forwarded.
+
+```luau
+local merged = outer:MergeMap(function(id)
+    return getSignalForId(id)
+end)
+```
+
+**Errors (from selector):**
+- `Signal.MergeMap: selector must return a Signal`
+
+---
+
+#### `handle:SwitchMap(selector)`
+
+Like `MergeMap`, but only the most recent inner signal is active. When a new outer event arrives, the previous inner signal is silently unsubscribed.
+
+```luau
+local switched = outer:SwitchMap(function(query)
+    return searchSignal(query)
+end)
+```
+
+**Errors (from selector):**
+- `Signal.SwitchMap: selector must return a Signal`
+
+---
+
+#### `handle:Take(count)`
+
+Forwards only the first `count` events, then destroys itself.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `count` | `number` | Positive integer |
+
+**Errors:**
+- `Signal.Take: count must be a positive integer`
+
+---
+
+#### `handle:Skip(count)`
+
+Skips the first `count` events, then forwards all subsequent ones.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `count` | `number` | Non-negative integer |
+
+**Errors:**
+- `Signal.Skip: count must be a non-negative integer`
+
+---
+
+#### `handle:TakeWhile(predicate)`
+
+Forwards events while `predicate` returns `true`. The first `false` result destroys the derived signal. Errors from `predicate` also destroy it.
+
+---
+
+#### `handle:SkipWhile(predicate)`
+
+Skips events while `predicate` returns `true`. Once `predicate` returns `false` (or errors), all subsequent events are forwarded.
+
+---
+
+#### `handle:TakeUntil(stopper)`
+
+Forwards events until `stopper` fires, then destroys itself.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `stopper` | `Signal<any>` | Must be a live Signal |
+
+**Errors:**
+- `Signal.TakeUntil: stopper must be a live Signal`
+
+---
+
+#### `handle:SkipUntil(starter)`
+
+Skips all events until `starter` fires at least once.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `starter` | `Signal<any>` | Must be a live Signal |
+
+**Errors:**
+- `Signal.SkipUntil: starter must be a live Signal`
+
+---
+
+#### `handle:Debounce(seconds)`
+
+Collapses rapid bursts into a single event fired `seconds` after the last input.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `seconds` | `number` | Must be `>= 0` |
+
+**Errors:**
+- `Signal.Debounce: seconds must be non-negative`
+
+```luau
+local settled = input:Debounce(0.3)
+-- fires 300 ms after the last rapid input event
+```
+
+---
+
+#### `handle:Throttle(seconds, opts?)`
+
+Limits the derived signal to at most one event per `seconds`-second window.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `seconds` | `number` | Must be `> 0` |
+| `opts` | `ThrottleOptions?` | Optional `{ Leading: boolean?, Trailing: boolean? }` |
+
+Default: `Leading = true, Trailing = true`.
+
+**Errors:**
+- `Signal.Throttle: seconds must be positive`
+- `Signal.Throttle: opts must be a table or nil`
+- `Signal.Throttle: Leading must be a boolean or nil`
+- `Signal.Throttle: Trailing must be a boolean or nil`
+
+```luau
+-- Leading-only: fires immediately on first input, ignores rest of window.
+local leading = clicks:Throttle(1, { Trailing = false })
+
+-- Trailing-only: fires at end of window with the last seen value.
+local trailing = clicks:Throttle(1, { Leading = false })
+```
+
+---
+
+#### `handle:Delay(seconds)`
+
+Re-emits each event after a `seconds`-second delay. Multiple in-flight events are tracked independently.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `seconds` | `number` | Must be `>= 0` |
+
+**Errors:**
+- `Signal.Delay: seconds must be non-negative`
+
+---
+
+#### `handle:BufferCount(count, step?)`
+
+Accumulates events into arrays of size `count`. When `step` is given, the window slides by `step` (overlapping windows). The payload is a packed array with `.n` set.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `count` | `number` | Buffer size; positive integer |
+| `step` | `number?` | Slide step; defaults to `count` |
+
+**Errors:**
+- `Signal.BufferCount: count must be a positive integer`
+- `Signal.BufferCount: step must be a positive integer`
+
+```luau
+local windows = values:BufferCount(3)
+-- fires {1,2,3}, {4,5,6}, ... (non-overlapping)
+
+local sliding = values:BufferCount(3, 1)
+-- fires {1,2,3}, {2,3,4}, {3,4,5}, ... (overlapping)
+```
+
+---
+
+#### `handle:BufferTime(seconds)`
+
+Accumulates events over a `seconds`-second window, then emits the collected array.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `seconds` | `number` | Must be `> 0` |
+
+**Errors:**
+- `Signal.BufferTime: seconds must be positive`
+
+---
+
+#### `handle:SampleBy(sampler)`
+
+Emits the most recent value from this signal whenever `sampler` fires. Skips if no value has arrived since the last sample.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `sampler` | `Signal<any>` | Must be a live Signal |
+
+**Errors:**
+- `Signal.SampleBy: sampler must be a live Signal`
+
+---
+
+### Static Combinators
+
+#### `Signal.Merge(signals)`
+
+Creates a signal that forwards events from any of the source signals.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `signals` | `{ Signal<any> }` | Non-empty array of live Signals |
+
+**Returns:** `Signal<any>`
+
+**Errors:**
+- `Signal.Merge: signals must be a non-empty dense array of Signals`
+
+```luau
+local combined = Signal.Merge({ onAttack, onHeal, onMove })
+```
+
+---
+
+#### `Signal.Zip(signals)`
+
+Fires once every time all source signals have each emitted one new event. The payload is an array `{ [1] = v1, [2] = v2, ..., n = count }` in source order.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `signals` | `{ Signal<any> }` | Non-empty array of live Signals |
+
+**Returns:** `Signal<{ any }>`
+
+**Errors:**
+- `Signal.Zip: signals must be a non-empty dense array of Signals`
+
+```luau
+local zipped = Signal.Zip({ xSignal, ySignal })
+zipped:Connect(function(pair)
+    print(pair[1], pair[2])  -- matched pair
+end)
+```
+
+---
+
+#### `Signal.Race(signals)`
+
+Creates a signal that mirrors whichever source fires first, then ignores all others.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `signals` | `{ Signal<any> }` | Non-empty array of live Signals |
+
+**Returns:** `Signal<any>`
+
+**Errors:**
+- `Signal.Race: signals must be a non-empty dense array of Signals`
+
+---
+
+#### `Signal.Sequence(signals, opts?)`
+
+Detects when signals fire in order. The derived signal fires a `{ Time: number, Completed: boolean }` result when the sequence completes (or mismatches, if `FireOnMismatch = true`).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `signals` | `{ Signal<any> }` | Non-empty ordered array |
+| `opts` | `SequenceOptions?` | Timing and behavior options |
+
+**`SequenceOptions` fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `MinTimeBetween` | `number?` | `0` | Minimum seconds between consecutive steps |
+| `MaxTimeBetween` | `number?` | `math.huge` | Maximum seconds between consecutive steps |
+| `MinTotalTime` | `number?` | `0` | Minimum total sequence duration |
+| `MaxTotalTime` | `number?` | `math.huge` | Maximum total sequence duration |
+| `ResetOnMismatch` | `boolean?` | `true` | Reset progress on out-of-order or timed-out step |
+| `FireOnMismatch` | `boolean?` | `false` | Emit `{ Completed = false }` on mismatch |
+
+**Returns:** `Signal<SequenceResult>`
+
+**Errors:**
+- `Signal.Sequence: signals must be a non-empty dense array of Signals`
+- `Signal.Sequence: opts must be a table or nil`
+- `Signal.Sequence: timing options must be non-negative`
+- `Signal.Sequence: MaxTimeBetween must be >= MinTimeBetween`
+- `Signal.Sequence: MaxTotalTime must be >= MinTotalTime`
+- `Signal.Sequence: ResetOnMismatch must be a boolean or nil`
+- `Signal.Sequence: FireOnMismatch must be a boolean or nil`
+
+```luau
+-- Detect double-tap: two taps within 0.5s of each other.
+local doubleTap = Signal.Sequence({ tap, tap }, {
+    MaxTimeBetween = 0.5,
+})
+doubleTap:Connect(function(result)
+    if result.Completed then
+        print("double tap! in", result.Time, "seconds")
+    end
+end)
+```
+
+---
+
+## Gotchas
+
+- **`Fire` is synchronous.** All listeners run before `Fire` returns. Avoid mutating signal or subscription state inside a listener during a fire.
+- **Derived signals are destroyed when the source is destroyed.** Chains like `src:Filter(...):Map(...)` are fully cleaned up when `src:Destroy()` is called.
+- **Replay fires are deferred, not immediate.** When `ReplayCount` or `ReplayTime` is set, new subscribers receive past events via `Scheduler.Defer` — they do not receive them synchronously inside `Connect`.
+- **`Wait` must be called from a yieldable coroutine.** Task coroutines are yieldable; module-level or non-coroutine code is not.
+- **`nil` is a valid payload.** Signals distinguish between "no event" and "event with nil payload" using internal presence tracking. Do not check `payload ~= nil` as a signal-fired indicator.
+- **`Signal.Never()` is truly unfirable.** Calling `Fire` on it throws, making it a safe "no-op" source for optional event wiring.
+- **Listener errors do not stop other listeners.** Each listener is wrapped in `ErrorHandler.Protect`; one error is routed but does not prevent subsequent listeners from running.
