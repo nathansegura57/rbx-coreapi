@@ -128,6 +128,22 @@ suite:Test("TakeCollected clears the internal buffer", function(ctx)
 	ctx:Expect(#second):ToBe(0)
 end)
 
+suite:Test("Policy enum constants are accepted by SetPolicy", function(ctx)
+	ErrorHandler.SetPolicy(ErrorHandler.Policy.Collect)
+	ctx:Expect(ErrorHandler.GetPolicy()):ToBe("Collect")
+	ErrorHandler.SetPolicy(ErrorHandler.Policy.Swallow)
+	ctx:Expect(ErrorHandler.GetPolicy()):ToBe("Swallow")
+end)
+
+suite:Test("Collect stores the original error info table by identity", function(ctx)
+	ErrorHandler.SetPolicy("Collect")
+	local info = { Module = "X", Phase = "P", Error = { Code = 5 } }
+	ErrorHandler.Report(info)
+	local collected = ErrorHandler.TakeCollected()
+	ctx:Expect(collected[1]):ToBe(info)
+	ctx:Expect((collected[1] :: any).Error.Code):ToBe(5)
+end)
+
 -- ── Reporter ──────────────────────────────────────────────────────────────────
 
 suite:Test("SetReporter installs a reporter called before policy action", function(ctx)
@@ -183,7 +199,7 @@ suite:Test("Nested Report during reporter skips reporter for nested call", funct
 	ctx:Expect(reporterCallCount):ToBe(1)
 end)
 
--- ── Protect / ProtectValue helpers ────────────────────────────────────────────
+-- ── Protect helper ────────────────────────────────────────────────────────────
 
 suite:Test("Protect returns true on success", function(ctx)
 	ErrorHandler.SetPolicy("Collect")
@@ -203,18 +219,28 @@ suite:Test("Protect returns false and routes error on failure", function(ctx)
 	ctx:Expect((collected[1] :: any).Module):ToBe("Mod")
 end)
 
-suite:Test("ProtectValue returns (true, value) on success", function(ctx)
+suite:Test("Protect returns (true, value) on success when value matters", function(ctx)
 	ErrorHandler.SetPolicy("Collect")
-	local ok, value = ErrorHandler.ProtectValue(function()
+	local ok, value = ErrorHandler.Protect(function()
 		return 42
 	end, "Mod", "Phase", nil)
 	ctx:Expect(ok):ToBe(true)
 	ctx:Expect(value):ToBe(42)
 end)
 
-suite:Test("ProtectValue returns (false, err) and routes error on failure", function(ctx)
+suite:Test("Protect preserves successful nil returns without reporting", function(ctx)
 	ErrorHandler.SetPolicy("Collect")
-	local ok, _ = ErrorHandler.ProtectValue(function()
+	local ok, value = ErrorHandler.Protect(function()
+		return nil
+	end, "Mod", "Phase", nil)
+	ctx:Expect(ok):ToBe(true)
+	ctx:Expect(value):ToBe(nil)
+	ctx:Expect(#ErrorHandler.TakeCollected()):ToBe(0)
+end)
+
+suite:Test("Protect returns (false, err) and routes error on failure", function(ctx)
+	ErrorHandler.SetPolicy("Collect")
+	local ok, _ = ErrorHandler.Protect(function()
 		error("fail")
 	end, "Mod", "Phase", nil)
 	ctx:Expect(ok):ToBe(false)

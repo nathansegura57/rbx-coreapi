@@ -41,6 +41,21 @@ suite:Test("Defer callback error routes through ErrorHandler", function(ctx)
 	errors:Uninstall()
 end)
 
+suite:Test("Flush drains nested deferred work in FIFO waves", function(ctx)
+	local order: { string } = {}
+	Scheduler.Defer(function()
+		table.insert(order, "a")
+		Scheduler.Defer(function()
+			table.insert(order, "c")
+		end)
+	end)
+	Scheduler.Defer(function()
+		table.insert(order, "b")
+	end)
+	ctx.Mock:Flush()
+	ctx:Expect(order):ToEqual({ "a", "b", "c" })
+end)
+
 -- ── Delay ─────────────────────────────────────────────────────────────────────
 
 suite:Test("Delay(seconds, fn) executes fn after the given duration", function(ctx)
@@ -93,6 +108,21 @@ suite:Test("Delay callback error routes through ErrorHandler", function(ctx)
 	errors:Uninstall()
 end)
 
+suite:Test("Delay callbacks with the same deadline preserve insertion order", function(ctx)
+	local order: { number } = {}
+	Scheduler.Delay(1, function()
+		table.insert(order, 1)
+	end)
+	Scheduler.Delay(1, function()
+		table.insert(order, 2)
+	end)
+	Scheduler.Delay(1, function()
+		table.insert(order, 3)
+	end)
+	ctx.Mock:Advance(1)
+	ctx:Expect(order):ToEqual({ 1, 2, 3 })
+end)
+
 -- ── Cancel ────────────────────────────────────────────────────────────────────
 
 suite:Test("Cancel(nil) is a no-op", function(ctx)
@@ -109,6 +139,19 @@ suite:Test("Cancel(handle) prevents the scheduled callback from running", functi
 	Scheduler.Cancel(handle)
 	ctx.Mock:Advance(2)
 	ctx:Expect(ran):ToBe(false)
+end)
+
+suite:Test("Cancel driver errors route through ErrorHandler under non-Throw policy", function(ctx)
+	ErrorHandler.SetPolicy("Collect")
+	Scheduler.SetDriver({
+		Cancel = function(_handle: any)
+			error("cancel exploded")
+		end,
+	})
+	Scheduler.Cancel("handle")
+	local collected = ErrorHandler.TakeCollected()
+	ctx:Expect(#collected):ToBe(1)
+	ctx:Expect((collected[1] :: any).Phase):ToBe("Cancel")
 end)
 
 -- ── Now ───────────────────────────────────────────────────────────────────────
@@ -176,6 +219,17 @@ suite:Test("OnStep callback error routes through ErrorHandler", function(ctx)
 	ctx.Mock:Step(0.1)
 	ctx:Expect(errors:HasPhase("OnStep")):ToBe(true)
 	errors:Uninstall()
+end)
+
+suite:Test("OnStep driver returning non-Connection throws", function(ctx)
+	Scheduler.SetDriver({
+		OnStep = function(_fn: (number) -> ())
+			return {} :: any
+		end,
+	})
+	ctx:Expect(function()
+		Scheduler.OnStep(function(_dt) end)
+	end):ToThrow("driver must return Connection")
 end)
 
 -- ── SetDriver / ResetDriver ───────────────────────────────────────────────────

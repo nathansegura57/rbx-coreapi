@@ -113,11 +113,11 @@ end
 
 -- Runs fn(); if it errors, routes through Report and returns (false, err).
 -- Returns (true, result) on success. Useful when the return value matters.
-function ErrorHandler.Protect(fn: () -> any, module: string, phase: string, name: string?): (boolean, any)
+function ErrorHandler.Protect<T>(fn: () -> T, module: string, phase: string, name: string?): (boolean, T)
 	local ok, result = pcall(fn)
 	if not ok then
 		ErrorHandler.Report({ Module = module, Phase = phase, Name = name, Error = result })
-		return false, result
+		return false, result :: any
 	end
 	return true, result
 end
@@ -131,3 +131,4 @@ end
 ErrorHandler.Policy = _policyEnum
 
 return ErrorHandler
+

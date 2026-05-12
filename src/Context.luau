@@ -6,23 +6,27 @@ local Scheduler = require(script.Parent.Scheduler)
 
 local Context = {}
 
+-- Base Context
+export type BaseContext<T> = {
+	Require: <V>(self: BaseContext<T>, key: ContextKey<V> | string) -> V,
+	Maybe: <V>(self: BaseContext<T>, key: ContextKey<V> | string) -> V?,
+	Has: (self: BaseContext<T>, key: ContextKey<unknown> | string) -> boolean,
+	Set: <V>(self: BaseContext<T>, key: ContextKey<V> | string, value: V) -> (),
+	Provide: (self: BaseContext<T>, values: { [ContextKey<unknown> | string]: unknown }) -> (),
+	Readonly: (self: BaseContext<T>) -> BaseContext<T>,
+	Destroy: (self: BaseContext<T>) -> (),
+	IsDestroyed: (self: BaseContext<T>) -> boolean,
+	OnDestroy: (self: BaseContext<T>, fn: () -> ()) -> Connection.Connection,
+}
+
 -- Public types
 
 export type ContextKey<T> = {}
 
-export type Context<T> = {
-	Require: <V>(self: Context<T>, key: ContextKey<V> | string) -> V,
-	Maybe: <V>(self: Context<T>, key: ContextKey<V> | string) -> V?,
-	Has: (self: Context<T>, key: ContextKey<any> | string) -> boolean,
-	Set: <V>(self: Context<T>, key: ContextKey<V> | string, value: V) -> (),
-	Provide: (self: Context<T>, values: { [any]: any }) -> (),
-	ProvideLazy: <V>(self: Context<T>, key: ContextKey<V> | string, provider: (Context<any>) -> V) -> (),
-	Layer: <L>(self: Context<T>, values: L, cleanup: (() -> ())?) -> Context<L>,
-	View: (self: Context<T>, keys: { any }) -> Context<any>,
-	Readonly: (self: Context<T>) -> Context<T>,
-	Destroy: (self: Context<T>) -> (),
-	IsDestroyed: (self: Context<T>) -> boolean,
-	OnDestroy: (self: Context<T>, fn: () -> ()) -> Connection.Connection,
+export type Context<T> = BaseContext<T> & {
+	ProvideLazy: <V>(self: Context<T>, key: ContextKey<V> | string, provider: (BaseContext<unknown>) -> V) -> (),
+	Layer: <L>(self: Context<T>, values: L, cleanup: (() -> ())?) -> BaseContext<L>,
+	View: (self: Context<T>, keys: { ContextKey<unknown> | string }) -> BaseContext<unknown>,
 }
 
 -- Internal record types
@@ -60,8 +64,8 @@ type KeyRecord = {
 
 -- Private state (weak keys so handles can be GC'd)
 
-local contextRecords: { [any]: ContextRecord } = setmetatable({}, { __mode = "k" } :: any)
-local keyRecords: { [any]: KeyRecord } = setmetatable({}, { __mode = "k" } :: any)
+local contextRecords: { [any]: ContextRecord } = setmetatable({}, { __mode = "k" }) :: any
+local keyRecords: { [any]: KeyRecord } = setmetatable({}, { __mode = "k" }) :: any
 
 -- Key helpers
 
@@ -486,20 +490,19 @@ local keyMeta: { [string]: any } = {
 
 -- Public API
 
-function Context.Root(values: any): any
+function Context.Root(values: { [any]: any }): Context<any>
 	if type(values) ~= "table" then
 		error("Context.Root: values must be a table")
 	end
 	local record = newRecord("root")
-	for k, v in values :: { [any]: any } do
+	for k, v in values do
 		record.Storage[k] = { Value = v }
 	end
 	return newHandle(record)
 end
 
-function Context.Key(name: string): any
-	local raw: any = name
-	if type(raw) ~= "string" or #raw == 0 then
+function Context.Key<T>(name: string): ContextKey<T>
+	if type(name) ~= "string" or #name == 0 then
 		error("Context.Key: name must be a non-empty string")
 	end
 	local handle: any = setmetatable({}, keyMeta)
@@ -515,3 +518,4 @@ function Context.IsContext(value: unknown): boolean
 end
 
 return Context
+

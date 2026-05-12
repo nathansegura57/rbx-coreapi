@@ -127,16 +127,6 @@ suite:Test("Start with Name option sets task name", function(ctx)
 	ctx:Expect(task:Name()):ToBe("MyTask")
 end)
 
--- ── Task.Defer (alias) ────────────────────────────────────────────────────────
-
-suite:Test("Defer has same semantics as Start", function(ctx)
-	local task = Task.Defer(function(_token) return "deferred" end)
-	ctx.Mock:Flush()
-	ctx:Expect(task:IsFulfilled()):ToBe(true)
-	local _, value = task:Result()
-	ctx:Expect(value):ToBe("deferred")
-end)
-
 -- ── Task.Delay ────────────────────────────────────────────────────────────────
 
 suite:Test("Delay(seconds) fulfills after timer", function(ctx)
@@ -578,6 +568,69 @@ suite:Test("Reason table contains expected constants", function(ctx)
 	ctx:Expect(Task.Reason.User):ToBe("User")
 	ctx:Expect(Task.Reason.Shutdown):ToBe("Shutdown")
 	ctx:Expect(Task.Reason.Capacity):ToBe("Capacity")
+end)
+
+-- ── Pathological coverage ────────────────────────────────────────────────────
+
+suite:Test("Delay callback errors settle the task as Errored", function(ctx)
+	local task = Task.Delay(1, function()
+		error("delay callback failed")
+	end)
+	ctx.Mock:Advance(1)
+	ctx:Expect(task:IsErrored()):ToBe(true)
+	local hasError, err = task:Error()
+	ctx:Expect(hasError):ToBe(true)
+	ctx:Expect(tostring(err)):ToMatch("delay callback failed")
+end)
+
+suite:Test("Await can be cancelled by an external token without settling awaited task", function(ctx)
+	local awaited = Task.Delay(10)
+	local canceller = Task.Start(function(_token)
+		return "driver"
+	end)
+	local awaitOk: boolean? = nil
+	local awaitReason: any = nil
+	local thread = coroutine.create(function()
+		awaitOk, awaitReason = awaited:Await(canceller:Token())
+	end)
+	coroutine.resume(thread)
+	canceller:Cancel("StopWaiting")
+	ctx.Mock:Flush()
+	ctx:Expect(awaitOk):ToBe(false)
+	ctx:Expect(awaitReason):ToBe("StopWaiting")
+	ctx:Expect(awaited:IsPending()):ToBe(true)
+end)
+
+suite:Test("Unwrap throws the stored error for rejected tasks", function(ctx)
+	local task = Task.Rejected("stored failure")
+	ctx:Expect(function()
+		task:Unwrap()
+	end):ToThrow("stored failure")
+end)
+
+suite:Test("AllSettled records fulfilled nil values by status", function(ctx)
+	local combined = Task.AllSettled({
+		Task.Resolved(nil),
+		Task.Rejected("bad"),
+		Task.Cancelled("done"),
+	})
+	ctx.Mock:Flush()
+	local ok, result = combined:Result()
+	ctx:Expect(ok):ToBe(true)
+	ctx:Expect(result[1].Status):ToBe(Task.Status.Fulfilled)
+	ctx:Expect(result[1].Value):ToBe(nil)
+	ctx:Expect(result[2].Status):ToBe(Task.Status.Errored)
+	ctx:Expect(result[2].Error):ToBe("bad")
+	ctx:Expect(result[3].Status):ToBe(Task.Status.Cancelled)
+	ctx:Expect(result[3].Reason):ToBe("done")
+end)
+
+suite:Test("Group.Add ignores terminal tasks and preserves zero Size", function(ctx)
+	local group = Task.Group()
+	group:Add(Task.Resolved(1))
+	group:Add(Task.Rejected("e"))
+	group:Add(Task.Cancelled("c"))
+	ctx:Expect(group:Size()):ToBe(0)
 end)
 
 return suite:Run()

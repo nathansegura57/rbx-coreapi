@@ -904,4 +904,74 @@ suite:Test("Sequence resets on wrong-order fire by default", function(ctx)
 	ctx:Expect(completed):ToBe(true)
 end)
 
+-- ── Pathological coverage ────────────────────────────────────────────────────
+
+suite:Test("Wait resumes with explicit nil payload", function(ctx)
+	local sig = Signal.New()
+	local received = "unset" :: any
+	local thread = coroutine.create(function()
+		received = sig:Wait()
+	end)
+	coroutine.resume(thread)
+	sig:Fire(nil)
+	ctx.Mock:Flush()
+	ctx:Expect(received):ToBe(nil)
+	ctx:Expect(coroutine.status(thread)):ToBe("dead")
+end)
+
+suite:Test("ReplayCount replays nil payloads as present values", function(ctx)
+	local sig = Signal.New():ReplayCount(2)
+	local received: { any } = {}
+	sig:Fire(nil)
+	sig:Fire("after")
+	sig:Connect(function(payload)
+		table.insert(received, { HasValue = true, Value = payload })
+	end)
+	ctx.Mock:Flush()
+	ctx:Expect(#received):ToBe(2)
+	ctx:Expect(received[1].HasValue):ToBe(true)
+	ctx:Expect(received[1].Value):ToBe(nil)
+	ctx:Expect(received[2].Value):ToBe("after")
+end)
+
+suite:Test("BufferCount preserves nil entries using packed length", function(ctx)
+	local sig = Signal.New()
+	local buffered = sig:BufferCount(2)
+	local result: any = nil
+	buffered:Connect(function(payload)
+		result = payload
+	end)
+	sig:Fire(nil)
+	sig:Fire("x")
+	ctx:Expect(result.n):ToBe(2)
+	ctx:Expect(result[1]):ToBe(nil)
+	ctx:Expect(result[2]):ToBe("x")
+end)
+
+suite:Test("Destroying delayed derived signal cancels pending payloads", function(ctx)
+	local sig = Signal.New()
+	local delayed = sig:Delay(1)
+	local count = 0
+	delayed:Connect(function(_payload)
+		count += 1
+	end)
+	sig:Fire("queued")
+	delayed:Destroy()
+	ctx.Mock:Advance(2)
+	ctx:Expect(count):ToBe(0)
+end)
+
+suite:Test("Sequence emits mismatch event when FireOnMismatch=true", function(ctx)
+	local sigA = Signal.New()
+	local sigB = Signal.New()
+	local seq = Signal.Sequence({ sigA, sigB }, { FireOnMismatch = true })
+	local result: any = nil
+	seq:Connect(function(payload)
+		result = payload
+	end)
+	sigB:Fire(nil)
+	ctx:Expect(result):ToNotBe(nil)
+	ctx:Expect(result.Completed):ToBe(false)
+end)
+
 return suite:Run()

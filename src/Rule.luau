@@ -152,10 +152,10 @@ type RuleRecord = {
 
 -- ── Private storage ───────────────────────────────────────────────────────────
 
-local ruleRecords: { [any]: RuleRecord } = setmetatable({}, { __mode = "k" } :: any)
+local ruleRecords: { [any]: RuleRecord } = setmetatable({}, { __mode = "k" }) :: any
 
 -- Scope → list of rule handles (for FSM to query)
-local _scopeAttach: { [any]: { any } } = setmetatable({}, { __mode = "k" } :: any)
+local _scopeAttach: { [any]: { any } } = setmetatable({}, { __mode = "k" }) :: any
 
 -- ── Tracer ────────────────────────────────────────────────────────────────────
 
@@ -214,7 +214,7 @@ end
 
 -- ── Policy validation ─────────────────────────────────────────────────────────
 
-local function validatePolicy(policy: any): (boolean, string?)
+local function validatePolicy(policy: PartialPolicy): (boolean, string?)
 	if type(policy) ~= "table" then
 		return false, "policy must be a table"
 	end
@@ -303,19 +303,19 @@ local function validatePolicy(policy: any): (boolean, string?)
 		if type(retry) ~= "table" then
 			return false, "Retry must be a table"
 		end
-		local retryCount = (retry :: any).Count
+		local retryCount = retry.Count
 		if type(retryCount) ~= "number" or retryCount < 1 or math.floor(retryCount) ~= retryCount then
 			return false, "Retry.Count must be a positive integer"
 		end
-		local retryBackoff = (retry :: any).Backoff
+		local retryBackoff = retry.Backoff
 		if retryBackoff ~= "Fixed" and retryBackoff ~= "Expo" then
 			return false, "Retry.Backoff must be 'Fixed' or 'Expo'"
 		end
-		local retryBase = (retry :: any).Base
+		local retryBase = retry.Base
 		if type(retryBase) ~= "number" or retryBase < 0 then
 			return false, "Retry.Base must be >= 0"
 		end
-		local retryJitter = (retry :: any).Jitter
+		local retryJitter = retry.Jitter
 		if retryJitter ~= nil and (type(retryJitter) ~= "number" or retryJitter < 0) then
 			return false, "Retry.Jitter must be >= 0"
 		end
@@ -712,7 +712,7 @@ end
 
 local Rule = {} :: any
 
-function Rule.New(name: string): any
+function Rule.New<Ctx, Payload>(name: string): Rule<Ctx, Payload>
 	if type(name) ~= "string" or #name == 0 then
 		error("Rule.New: name must be a non-empty string", 2)
 	end
@@ -774,7 +774,7 @@ function Rule.SetTracer(fn: ((TraceEvent) -> ())?): ()
 end
 
 -- Internal: get rules attached to a scope (used by FSM)
-function Rule._getAttachedRules(scope: any): { any }
+function Rule._getAttachedRules(scope: any): { Rule<any, any> }
 	return _scopeAttach[scope] or {}
 end
 
@@ -1050,4 +1050,29 @@ Rule.Schedule = table.freeze({
 	Deferred = "Deferred" :: "Deferred",
 })
 
-return Rule
+export type RuleModuleType = {
+	New: <Ctx, Payload>(name: string) -> Rule<Ctx, Payload>,
+	IsRule: (value: unknown) -> boolean,
+	DefaultPolicy: () -> Policy,
+	ValidatePolicy: (policy: PartialPolicy) -> (boolean, string?),
+	SetTracer: (fn: ((TraceEvent) -> ())?) -> (),
+	_getAttachedRules: (scope: any) -> { Rule<any, any> },
+	Concurrency: {
+		Exhaust: "Exhaust",
+		Merge: "Merge",
+		Concat: "Concat",
+		Switch: "Switch",
+	},
+	Overflow: {
+		Drop: "Drop",
+		Latest: "Latest",
+		Fifo: "Fifo",
+	},
+	Schedule: {
+		Immediate: "Immediate",
+		Deferred: "Deferred",
+	},
+}
+
+return Rule :: RuleModuleType
+

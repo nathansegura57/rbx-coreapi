@@ -15,7 +15,7 @@ type Record = {
 }
 
 -- Weak keys: records are kept as long as the handle has a strong reference.
-local records: { [any]: Record } = setmetatable({}, { __mode = "k" } :: any)
+local records: { [any]: Record } = setmetatable({}, { __mode = "k" }) :: any
 
 local function disconnect(self: Connection): ()
 	local record: Record? = records[self :: any]
@@ -71,3 +71,4 @@ function Connection.IsConnection(value: unknown): boolean
 end
 
 return Connection
+

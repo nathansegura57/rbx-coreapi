@@ -279,7 +279,7 @@ suite:Test("Destroying readonly view does not destroy source", function(ctx)
 	ctx:Expect(source:IsDestroyed()):ToBe(false)
 end)
 
--- ── Get / Peek / Set / Update ─────────────────────────────────────────────────
+-- ── Get / Set / Update ────────────────────────────────────────────────────────
 
 suite:Test("Get returns current value", function(ctx)
 	local store = Store.Value("hello")
@@ -292,11 +292,6 @@ suite:Test("Get on destroyed store throws", function(ctx)
 	ctx:Expect(function()
 		store:Get()
 	end):ToThrow("store is destroyed")
-end)
-
-suite:Test("Peek returns same as Get", function(ctx)
-	local store = Store.Value(7)
-	ctx:Expect(store:Peek()):ToBe(7)
 end)
 
 suite:Test("Set updates the value immediately", function(ctx)
@@ -652,6 +647,93 @@ suite:Test("History: limit caps undo stack size", function(ctx)
 	local canUndoMore = history.Undo()
 	ctx:Expect(canUndoMore):ToBe(false)
 	history.Destroy()
+end)
+
+-- ── Pathological coverage ────────────────────────────────────────────────────
+
+suite:Test("Custom Equals can suppress structurally different values", function(ctx)
+	local store = Store.Value({ id = 1, rev = 1 }, {
+		Equals = function(a, b)
+			return a.id == b.id
+		end,
+	})
+	local count = 0
+	store:Subscribe(function(_new, old)
+		if old ~= nil then
+			count += 1
+		end
+	end, { Immediate = false })
+	store:Set({ id = 1, rev = 2 })
+	ctx.Mock:Flush()
+	ctx:Expect(count):ToBe(0)
+	ctx:Expect(store:Get().rev):ToBe(1)
+end)
+
+suite:Test("Nested Batch coalesces multiple sets into one notification with first old value", function(ctx)
+	local store = Store.Value(0)
+	local received: { any } = {}
+	store:Subscribe(function(newVal, oldVal)
+		table.insert(received, { newVal, oldVal })
+	end, { Immediate = false })
+	Store.Batch(function()
+		store:Set(1)
+		Store.Batch(function()
+			store:Set(2)
+			store:Set(3)
+		end)
+	end)
+	ctx:Expect(#received):ToBe(1)
+	ctx:Expect(received[1][1]):ToBe(3)
+	ctx:Expect(received[1][2]):ToBe(0)
+end)
+
+suite:Test("Transaction defers and coalesces notifications until scheduler flush", function(ctx)
+	local store = Store.Value("a")
+	local received: { any } = {}
+	store:Subscribe(function(newVal, oldVal)
+		table.insert(received, { newVal, oldVal })
+	end, { Immediate = false })
+	Store.Transaction(function()
+		store:Set("b")
+		store:Set("c")
+	end)
+	ctx:Expect(#received):ToBe(0)
+	ctx.Mock:Flush()
+	ctx:Expect(#received):ToBe(1)
+	ctx:Expect(received[1][1]):ToBe("c")
+	ctx:Expect(received[1][2]):ToBe("a")
+end)
+
+suite:Test("Wait resumes with explicit nil new value and old value", function(ctx)
+	local store = Store.Value("before")
+	local newValue = "unset" :: any
+	local oldValue = "unset" :: any
+	local thread = coroutine.create(function()
+		newValue, oldValue = store:Wait()
+	end)
+	coroutine.resume(thread)
+	store:Set(nil)
+	ctx.Mock:Flush()
+	ctx:Expect(newValue):ToBe(nil)
+	ctx:Expect(oldValue):ToBe("before")
+	ctx:Expect(coroutine.status(thread)):ToBe("dead")
+end)
+
+suite:Test("Destroying a store wakes Wait with a destroyed-store error", function(ctx)
+	local store = Store.Value(1)
+	local errorMessage: string? = nil
+	local thread = coroutine.create(function()
+		local ok, err = pcall(function()
+			store:Wait()
+		end)
+		if not ok then
+			errorMessage = tostring(err)
+		end
+	end)
+	coroutine.resume(thread)
+	store:Destroy()
+	ctx.Mock:Flush()
+	ctx:Expect(errorMessage :: any):ToMatch("store destroyed")
 end)
 
 return suite:Run()

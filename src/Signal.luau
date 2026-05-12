@@ -6,14 +6,39 @@ local Scheduler = require(script.Parent.Scheduler)
 
 local Signal = {}
 
-export type Signal<T> = {
-	Connect: (self: Signal<T>, listener: (T) -> ()) -> Connection.Connection,
-	Once: (self: Signal<T>, listener: (T) -> ()) -> Connection.Connection,
-	Fire: (self: Signal<T>, payload: T) -> (),
-	Wait: (self: Signal<T>) -> T,
-	DisconnectAll: (self: Signal<T>) -> (),
-	Destroy: (self: Signal<T>) -> (),
-	IsDestroyed: (self: Signal<T>) -> boolean,
+export type CoreSignal<T> = {
+	Connect: (self: CoreSignal<T>, listener: (T) -> ()) -> Connection.Connection,
+	Once: (self: CoreSignal<T>, listener: (T) -> ()) -> Connection.Connection,
+	Fire: (self: CoreSignal<T>, payload: T) -> (),
+	Wait: (self: CoreSignal<T>) -> T,
+	DisconnectAll: (self: CoreSignal<T>) -> (),
+	Destroy: (self: CoreSignal<T>) -> (),
+	IsDestroyed: (self: CoreSignal<T>) -> boolean,
+
+	Filter: (self: CoreSignal<T>, predicate: (T) -> boolean) -> CoreSignal<T>,
+	Take: (self: CoreSignal<T>, count: number) -> CoreSignal<T>,
+	Skip: (self: CoreSignal<T>, count: number) -> CoreSignal<T>,
+	TakeWhile: (self: CoreSignal<T>, predicate: (T) -> boolean) -> CoreSignal<T>,
+	SkipWhile: (self: CoreSignal<T>, predicate: (T) -> boolean) -> CoreSignal<T>,
+	Debounce: (self: CoreSignal<T>, seconds: number) -> CoreSignal<T>,
+	Throttle: (self: CoreSignal<T>, seconds: number, opts: ThrottleOptions?) -> CoreSignal<T>,
+	Delay: (self: CoreSignal<T>, seconds: number) -> CoreSignal<T>,
+
+	ReplayCount: (self: CoreSignal<T>, count: number) -> CoreSignal<T>,
+	ReplayTime: (self: CoreSignal<T>, seconds: number) -> CoreSignal<T>,
+	ClearReplay: (self: CoreSignal<T>) -> CoreSignal<T>,
+}
+
+export type Signal<T> = CoreSignal<T> & {
+	Map: <U>(self: Signal<T>, mapper: (T) -> U) -> CoreSignal<U>,
+	Scan: <U>(self: Signal<T>, reducer: (U, T) -> U, seed: U) -> CoreSignal<U>,
+	MergeMap: <U>(self: Signal<T>, mapper: (T) -> CoreSignal<U>) -> CoreSignal<U>,
+	SwitchMap: <U>(self: Signal<T>, mapper: (T) -> CoreSignal<U>) -> CoreSignal<U>,
+	TakeUntil: <U>(self: Signal<T>, stopper: CoreSignal<U>) -> Signal<T>,
+	SkipUntil: <U>(self: Signal<T>, starter: CoreSignal<U>) -> Signal<T>,
+	BufferCount: (self: Signal<T>, count: number, step: number?) -> CoreSignal<{ T } & { n: number }>,
+	BufferTime: (self: Signal<T>, seconds: number) -> CoreSignal<{ T } & { n: number }>,
+	SampleBy: <U>(self: Signal<T>, sampler: CoreSignal<U>) -> Signal<T>,
 }
 
 export type ThrottleOptions = {
@@ -66,7 +91,7 @@ type SignalRecord = {
 	TimerHandles: { any },
 }
 
-local records: { [any]: SignalRecord } = setmetatable({}, { __mode = "k" } :: any)
+local records: { [any]: SignalRecord } = setmetatable({}, { __mode = "k" }) :: any
 
 local function trimReplayTime(record: SignalRecord): ()
 	local now = Scheduler.Now()
@@ -184,15 +209,15 @@ end
 
 -- Constructors
 
-function Signal.New(): any
+function Signal.New<T>(): Signal<T>
 	return newHandle(false)
 end
 
-function Signal.Never(): any
+function Signal.Never<T>(): Signal<T>
 	return newHandle(true)
 end
 
-function Signal.After(seconds: number): any
+function Signal.After(seconds: number): Signal<nil>
 	if type(seconds) ~= "number" or not (seconds >= 0) then
 		error("Signal.After: seconds must be non-negative")
 	end
@@ -208,7 +233,7 @@ function Signal.After(seconds: number): any
 	return h
 end
 
-function Signal.Every(seconds: number): any
+function Signal.Every(seconds: number): Signal<nil>
 	if type(seconds) ~= "number" or not (seconds > 0) then
 		error("Signal.Every: seconds must be positive")
 	end
@@ -233,7 +258,7 @@ function Signal.Every(seconds: number): any
 	return h
 end
 
-function Signal.FromRoblox(rbxSignal: any, mapper: ((...any) -> any)?): any
+function Signal.FromRoblox(rbxSignal: RBXScriptSignal, mapper: ((...any) -> any)?): Signal<any>
 	if typeof(rbxSignal) ~= "RBXScriptSignal" then
 		error("Signal.FromRoblox: expected RBXScriptSignal")
 	end
@@ -242,16 +267,14 @@ function Signal.FromRoblox(rbxSignal: any, mapper: ((...any) -> any)?): any
 	end
 	local h = newHandle(false)
 	local rec = records[h] :: SignalRecord
-	local rbxConn = rbxSignal:Connect(function(...)
+	local rbxConn = (rbxSignal :: any):Connect(function(...)
 		local r = records[h] :: SignalRecord?
 		if r == nil or r.Destroyed then return end
-		local payload: any
+		local payload: any = table.pack(...)
 		if mapper ~= nil then
-			local ok, result = ErrorHandler.Protect(function() return mapper(...) end, "Signal", "FromRoblox")
+			local ok, result = ErrorHandler.Protect(function() return mapper(table.unpack(payload, 1, payload.n)) end, "Signal", "FromRoblox")
 			if not ok then return end
 			payload = result
-		else
-			payload = table.pack(...)
 		end
 		signalMethods.Fire(h, payload)
 	end)
@@ -994,44 +1017,44 @@ end
 
 -- Static combinators
 
-function Signal.Merge(signals: { any }): any
+function Signal.Merge<T>(signals: { CoreSignal<T> }): Signal<T>
 	if type(signals) ~= "table" or #signals == 0 then
 		error("Signal.Merge: signals must be a non-empty dense array of Signals")
 	end
 	for i = 1, #signals do
-		if not Signal.IsSignal(signals[i]) or (records[signals[i]] :: SignalRecord).Destroyed then
+		if not Signal.IsSignal(signals[i]) or (records[signals[i] :: any] :: SignalRecord).Destroyed then
 			error("Signal.Merge: signals must be a non-empty dense array of Signals")
 		end
 	end
-	local derived = Signal.New()
-	local dr = records[derived] :: SignalRecord
+	local derived: Signal<T> = Signal.New()
+	local dr = records[derived :: any] :: SignalRecord
 	for _, src in signals do
-		connectDerived(src, derived, function(payload: any): ()
+		connectDerived(src :: any, derived :: any, function(payload: any): ()
 			if not dr.Destroyed then
-				signalMethods.Fire(derived, payload)
+				signalMethods.Fire(derived :: any, payload)
 			end
 		end)
 	end
 	return derived
 end
 
-function Signal.Zip(signals: { any }): any
+function Signal.Zip<T>(signals: { CoreSignal<T> }): Signal<{ T }>
 	if type(signals) ~= "table" or #signals == 0 then
 		error("Signal.Zip: signals must be a non-empty dense array of Signals")
 	end
 	for i = 1, #signals do
-		if not Signal.IsSignal(signals[i]) or (records[signals[i]] :: SignalRecord).Destroyed then
+		if not Signal.IsSignal(signals[i]) or (records[signals[i] :: any] :: SignalRecord).Destroyed then
 			error("Signal.Zip: signals must be a non-empty dense array of Signals")
 		end
 	end
 	local n = #signals
-	local derived = Signal.New()
-	local dr = records[derived] :: SignalRecord
+	local derived: Signal<{ T }> = Signal.New()
+	local dr = records[derived :: any] :: SignalRecord
 	local filled: { boolean } = table.create(n, false)
-	local vals: { any } = table.create(n, nil)
+	local vals: { T } = table.create(n)
 	for idx, src in signals do
 		local i = idx
-		connectDerived(src, derived, function(payload: any): ()
+		connectDerived(src :: any, derived :: any, function(payload: any): ()
 			if dr.Destroyed then return end
 			if filled[i] then return end
 			filled[i] = true
@@ -1044,35 +1067,35 @@ function Signal.Zip(signals: { any }): any
 				end
 			end
 			if allFilled then
-				local arr: { any } = table.create(n)
+				local arr: { T } = table.create(n)
 				for j = 1, n do
 					arr[j] = vals[j]
 				end
 				(arr :: any).n = n
 				for j = 1, n do
 					filled[j] = false
-					vals[j] = nil
+					vals[j] = nil :: any
 				end
-				signalMethods.Fire(derived, arr)
+				signalMethods.Fire(derived :: any, arr)
 			end
 		end)
 	end
 	return derived
 end
 
-function Signal.Race(signals: { any }): any
+function Signal.Race<T>(signals: { CoreSignal<T> }): Signal<T>
 	if type(signals) ~= "table" or #signals == 0 then
 		error("Signal.Race: signals must be a non-empty dense array of Signals")
 	end
 	for i = 1, #signals do
-		if not Signal.IsSignal(signals[i]) or (records[signals[i]] :: SignalRecord).Destroyed then
+		if not Signal.IsSignal(signals[i]) or (records[signals[i] :: any] :: SignalRecord).Destroyed then
 			error("Signal.Race: signals must be a non-empty dense array of Signals")
 		end
 	end
-	local derived = Signal.New()
-	local dr = records[derived] :: SignalRecord
-	local winner: any = nil
-	type EntryPair = { entry: ListenerEntry, source: any }
+	local derived: Signal<T> = Signal.New()
+	local dr = records[derived :: any] :: SignalRecord
+	local winner: CoreSignal<T>? = nil
+	type EntryPair = { entry: ListenerEntry, source: CoreSignal<T> }
 	local pairs: { EntryPair } = {}
 	for _, src in signals do
 		local s = src
@@ -1090,16 +1113,16 @@ function Signal.Race(signals: { any }): any
 					end
 				end
 				if winner == s then
-					signalMethods.Fire(derived, payload)
+					signalMethods.Fire(derived :: any, payload)
 				end
 			end,
 		}
-		local sr = records[s] :: SignalRecord
+		local sr = records[s :: any] :: SignalRecord
 		table.insert(sr.Listeners, entry)
 		table.insert(pairs, { entry = entry, source = s })
 		table.insert(sr.CleanupFns, function()
 			if not dr.Destroyed and (winner == nil or winner == s) then
-				signalMethods.Destroy(derived)
+				signalMethods.Destroy(derived :: any)
 			end
 		end)
 	end
@@ -1112,12 +1135,12 @@ function Signal.Race(signals: { any }): any
 	return derived
 end
 
-function Signal.Sequence(signals: { any }, opts: SequenceOptions?): any
+function Signal.Sequence<T>(signals: { CoreSignal<T> }, opts: SequenceOptions?): Signal<SequenceResult>
 	if type(signals) ~= "table" or #signals == 0 then
 		error("Signal.Sequence: signals must be a non-empty dense array of Signals")
 	end
 	for i = 1, #signals do
-		if not Signal.IsSignal(signals[i]) or (records[signals[i]] :: SignalRecord).Destroyed then
+		if not Signal.IsSignal(signals[i]) or (records[signals[i] :: any] :: SignalRecord).Destroyed then
 			error("Signal.Sequence: signals must be a non-empty dense array of Signals")
 		end
 	end
@@ -1131,7 +1154,7 @@ function Signal.Sequence(signals: { any }, opts: SequenceOptions?): any
 		if type(opts) ~= "table" then
 			error("Signal.Sequence: opts must be a table or nil")
 		end
-		local raw: any = opts
+		local raw: SequenceOptions = opts
 		if raw.MinTimeBetween ~= nil then
 			if type(raw.MinTimeBetween) ~= "number" or raw.MinTimeBetween < 0 then
 				error("Signal.Sequence: timing options must be non-negative")
@@ -1175,8 +1198,8 @@ function Signal.Sequence(signals: { any }, opts: SequenceOptions?): any
 			error("Signal.Sequence: MaxTotalTime must be >= MinTotalTime")
 		end
 	end
-	local derived = Signal.New()
-	local dr = records[derived] :: SignalRecord
+	local derived: Signal<SequenceResult> = Signal.New()
+	local dr = records[derived :: any] :: SignalRecord
 	local step = 0
 	local startTime = 0
 	local lastStepTime = 0
@@ -1186,18 +1209,18 @@ function Signal.Sequence(signals: { any }, opts: SequenceOptions?): any
 		startTime = 0
 		lastStepTime = 0
 	end
-	local seen: { [any]: boolean } = {}
+	local seen: { [CoreSignal<T>]: boolean } = {}
 	for _, src in signals do
 		if not seen[src] then
 			seen[src] = true
-			connectDerived(src, derived, function(_payload: any): ()
+			connectDerived(src :: any, derived :: any, function(_payload: any): ()
 				if dr.Destroyed then return end
 				local now = Scheduler.Now()
 				local expected = signals[step + 1]
 				if src ~= expected then
 					local elapsed = if step > 0 then now - startTime else 0
 					if fireOnMismatch then
-						signalMethods.Fire(derived, { Time = elapsed, Completed = false })
+						signalMethods.Fire(derived :: any, { Time = elapsed, Completed = false })
 					end
 					if resetOnMismatch then
 						resetState()
@@ -1209,7 +1232,7 @@ function Signal.Sequence(signals: { any }, opts: SequenceOptions?): any
 					if dt < minBetween or dt > maxBetween then
 						local elapsed = now - startTime
 						if fireOnMismatch then
-							signalMethods.Fire(derived, { Time = elapsed, Completed = false })
+							signalMethods.Fire(derived :: any, { Time = elapsed, Completed = false })
 						end
 						if resetOnMismatch then
 							resetState()
@@ -1225,7 +1248,7 @@ function Signal.Sequence(signals: { any }, opts: SequenceOptions?): any
 				local elapsed = now - startTime
 				if elapsed > maxTotal then
 					if fireOnMismatch then
-						signalMethods.Fire(derived, { Time = elapsed, Completed = false })
+						signalMethods.Fire(derived :: any, { Time = elapsed, Completed = false })
 					end
 					if resetOnMismatch then
 						resetState()
@@ -1234,11 +1257,11 @@ function Signal.Sequence(signals: { any }, opts: SequenceOptions?): any
 				end
 				if step >= seqLen then
 					if elapsed >= minTotal then
-						signalMethods.Fire(derived, { Time = elapsed, Completed = true })
+						signalMethods.Fire(derived :: any, { Time = elapsed, Completed = true })
 						resetState()
 					else
 						if fireOnMismatch then
-							signalMethods.Fire(derived, { Time = elapsed, Completed = false })
+							signalMethods.Fire(derived :: any, { Time = elapsed, Completed = false })
 						end
 						if resetOnMismatch then
 							resetState()
@@ -1252,3 +1275,4 @@ function Signal.Sequence(signals: { any }, opts: SequenceOptions?): any
 end
 
 return Signal
+

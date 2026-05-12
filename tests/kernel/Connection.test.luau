@@ -124,6 +124,23 @@ suite:Test("Disconnect on invalid handle throws", function(ctx)
 	end):ToThrow("invalid connection")
 end)
 
+suite:Test("Disconnect callback can re-enter Disconnect without running twice", function(ctx)
+	local callCount = 0
+	local conn: Connection.Connection
+	conn = Connection.New(function()
+		callCount += 1
+		conn:Disconnect()
+	end)
+	conn:Disconnect()
+	ctx:Expect(callCount):ToBe(1)
+	ctx:Expect(conn.Connected):ToBe(false)
+end)
+
+suite:Test("Unknown fields read as nil and do not masquerade as methods", function(ctx)
+	local conn = Connection.New()
+	ctx:Expect((conn :: any).MadeUpField):ToBe(nil)
+end)
+
 -- ── IsConnection ──────────────────────────────────────────────────────────────
 
 suite:Test("IsConnection returns true for live connection", function(ctx)

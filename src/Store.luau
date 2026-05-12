@@ -7,18 +7,21 @@ local Signal = require(script.Parent.Signal)
 
 local Store = {}
 
-export type ReadableStore<T> = {
-	Get: (self: ReadableStore<T>) -> T,
-	Subscribe: (self: ReadableStore<T>, listener: (T, T?) -> (), opts: SubscribeOptions?) -> Connection.Connection,
-	Changed: (self: ReadableStore<T>) -> Signal.Signal<{ New: T, Old: T }>,
-	Map: <U>(self: ReadableStore<T>, picker: (T) -> U, equals: ((U, U) -> boolean)?) -> ReadableStore<U>,
-	Equals: (self: ReadableStore<T>, equals: (T, T) -> boolean) -> ReadableStore<T>,
-	Name: (self: ReadableStore<T>) -> string?,
-	Deps: (self: ReadableStore<T>) -> { ReadableStore<any> },
-	Wait: (self: ReadableStore<T>) -> (T, T),
-	DisconnectAll: (self: ReadableStore<T>) -> (),
-	IsDestroyed: (self: ReadableStore<T>) -> boolean,
-	Destroy: (self: ReadableStore<T>) -> (),
+type BaseStore<T> = {
+	Get: (self: BaseStore<T>) -> T,
+	Subscribe: (self: BaseStore<T>, listener: (T, T?) -> (), opts: SubscribeOptions?) -> Connection.Connection,
+	Changed: (self: BaseStore<T>) -> Signal.Signal<{ New: T, Old: T }>,
+	Equals: (self: BaseStore<T>, equals: (T, T) -> boolean) -> BaseStore<T>,
+	Name: (self: BaseStore<T>) -> string?,
+	Wait: (self: BaseStore<T>) -> (T, T),
+	DisconnectAll: (self: BaseStore<T>) -> (),
+	IsDestroyed: (self: BaseStore<T>) -> boolean,
+	Destroy: (self: BaseStore<T>) -> (),
+}
+
+export type ReadableStore<T> = BaseStore<T> & {
+	Map: <U>(self: ReadableStore<T>, picker: (T) -> U, equals: ((U, U) -> boolean)?) -> BaseStore<U>,
+	Deps: (self: ReadableStore<T>) -> { BaseStore<any> },
 }
 
 export type WritableStore<T> = ReadableStore<T> & {
@@ -38,6 +41,10 @@ export type ValueOptions<T> = {
 }
 
 export type DeriveOptions<T> = ValueOptions<T>
+
+export type RestoreOptions = {
+	Strict: boolean?,
+}
 
 -- Internal
 
@@ -66,7 +73,7 @@ type StoreRecord = {
 	DerivedConsumers: { any },
 }
 
-local records: { [any]: StoreRecord } = setmetatable({}, { __mode = "k" } :: any)
+local records: { [any]: StoreRecord } = setmetatable({}, { __mode = "k" }) :: any
 local _namedStores: { [string]: any } = {}
 local _batchDepth = 0
 local _transactionDepth = 0
@@ -139,7 +146,7 @@ recomputeDerived = function(handle: any): ()
 	local oldValue = r.Value
 	local ok, newValue = ErrorHandler.Protect(function() return (r.Compute :: () -> any)() end, "Store", "Derive")
 	if not ok then return end
-	local eq = if r.Equals ~= nil then r.Equals else defaultEquals
+	local eq: (any, any) -> boolean = if r.Equals ~= nil then r.Equals else defaultEquals
 	if eq(oldValue, newValue) then return end
 	r.Value = newValue
 	markDirty(handle, oldValue)
@@ -230,7 +237,7 @@ end
 
 -- Constructors
 
-function Store.Value(initial: any, opts: any?): any
+function Store.Value<T>(initial: T, opts: ValueOptions<T>?): WritableStore<T>
 	local name, eq, replaceName = parseValueOpts("Store.Value", opts)
 	if name ~= nil and _namedStores[name] ~= nil and not replaceName then
 		error(`Store.Value: duplicate store name '{name}'`)
@@ -246,14 +253,14 @@ function Store.Value(initial: any, opts: any?): any
 	return h
 end
 
-function Store.Const(value: any): any
+function Store.Const<T>(value: T): ReadableStore<T>
 	local h = newHandle("const")
 	local rec = records[h] :: StoreRecord
 	rec.Value = value
 	return h
 end
 
-function Store.Derive(compute: any, deps: any, opts: any?): any
+function Store.Derive<T>(compute: () -> T, deps: { ReadableStore<any> }, opts: DeriveOptions<T>?): ReadableStore<T>
 	if type(compute) ~= "function" then
 		error("Store.Derive: compute must be a function")
 	end
@@ -262,7 +269,7 @@ function Store.Derive(compute: any, deps: any, opts: any?): any
 	end
 	for i = 1, #deps do
 		local dep = deps[i]
-		if not Store.IsStore(dep) or (records[dep] :: StoreRecord).Destroyed then
+		if not Store.IsStore(dep) or (records[dep :: any] :: StoreRecord).Destroyed then
 			error(`Store.Derive: dep at index {i} is not a live Store`)
 		end
 	end
@@ -284,13 +291,13 @@ function Store.Derive(compute: any, deps: any, opts: any?): any
 	local h = newHandle("derived")
 	local rec = records[h] :: StoreRecord
 	rec.Value = initValue
-	rec.Compute = compute
+	rec.Compute = compute :: () -> any
 	rec.Name = name
 	rec.Equals = eq
 	for i = 1, #deps do
 		local dep = deps[i]
-		rec.Deps[i] = dep
-		local depRec = records[dep] :: StoreRecord
+		rec.Deps[i] = dep :: any
+		local depRec = records[dep :: any] :: StoreRecord
 		table.insert(depRec.DerivedConsumers, h)
 	end
 	if name ~= nil then
@@ -299,8 +306,8 @@ function Store.Derive(compute: any, deps: any, opts: any?): any
 	return h
 end
 
-function Store.Select(source: any, picker: any, equals: any?): any
-	if not Store.IsStore(source) or (records[source] :: StoreRecord).Destroyed then
+function Store.Select<T, U>(source: ReadableStore<T>, picker: (T) -> U, equals: ((U, U) -> boolean)?): ReadableStore<U>
+	if not Store.IsStore(source) or (records[source :: any] :: StoreRecord).Destroyed then
 		error("Store.Select: source must be a live Store")
 	end
 	if type(picker) ~= "function" then
@@ -310,144 +317,148 @@ function Store.Select(source: any, picker: any, equals: any?): any
 		error("Store.Select: equals must be a function or nil")
 	end
 	local src = source
-	return Store.Derive(function()
-		return picker((records[src] :: StoreRecord).Value)
-	end, { source }, if equals ~= nil then { Equals = equals } else nil)
+	return Store.Derive(function(): U
+		return picker((records[src :: any] :: StoreRecord).Value :: T)
+	end, { source :: ReadableStore<any> }, if equals ~= nil then { Equals = equals :: (any, any) -> boolean } else nil)
 end
 
-function Store.Combine(values: any): any
+function Store.Combine<T>(values: { ReadableStore<T> } | { [string]: ReadableStore<T> }): ReadableStore<{ T }>
 	if type(values) ~= "table" then
 		error("Store.Combine: input must be a table")
 	end
+	local raw = values :: { [any]: ReadableStore<any> }
 	local keyCount = 0
-	for _ in values do keyCount += 1 end
+	for _ in raw do keyCount += 1 end
 	if keyCount == 0 then
 		error("Store.Combine: input must not be empty")
 	end
-	local isArray = keyCount == #values and #values > 0
+	local isArray = keyCount == #(raw :: any) and #(raw :: any) > 0
 	if isArray then
-		for i = 1, #values do
-			if not Store.IsStore(values[i]) or (records[values[i]] :: StoreRecord).Destroyed then
+		local arr = raw :: { ReadableStore<any> }
+		for i = 1, #arr do
+			if not Store.IsStore(arr[i]) or (records[arr[i] :: any] :: StoreRecord).Destroyed then
 				error(`Store.Combine: entry at index {i} is not a live Store`)
 			end
 		end
-		local deps = table.clone(values)
-		return Store.Derive(function()
-			local result: { any } = table.create(#deps)
+		local deps: { ReadableStore<any> } = table.clone(arr)
+		return Store.Derive(function(): { T }
+			local result: { T } = table.create(#deps)
 			for i = 1, #deps do
-				result[i] = (records[deps[i]] :: StoreRecord).Value
+				result[i] = (records[deps[i] :: any] :: StoreRecord).Value :: T
 			end
 			return result
 		end, deps)
 	else
-		local keys: { any } = {}
-		local depList: { any } = {}
-		for k, s in values do
-			if not Store.IsStore(s) or (records[s] :: StoreRecord).Destroyed then
+		local keys: { string } = {}
+		local depList: { ReadableStore<any> } = {}
+		for k, s in raw do
+			if not Store.IsStore(s) or (records[s :: any] :: StoreRecord).Destroyed then
 				error(`Store.Combine: value for key '{tostring(k)}' is not a live Store`)
 			end
-			table.insert(keys, k)
+			table.insert(keys, k :: string)
 			table.insert(depList, s)
 		end
-		local storeMap = table.clone(values)
-		return Store.Derive(function()
-			local result: { [any]: any } = {}
+		local storeMap: { [string]: ReadableStore<any> } = table.clone(raw) :: { [string]: ReadableStore<any> }
+		return Store.Derive(function(): { T }
+			local result: { [string]: T } = {}
 			for _, k in keys do
-				result[k] = (records[storeMap[k]] :: StoreRecord).Value
+				result[k] = (records[storeMap[k] :: any] :: StoreRecord).Value :: T
 			end
-			return result
+			return result :: any
 		end, depList)
 	end
 end
 
-function Store.AllTruthy(stores: any): any
+function Store.AllTruthy(stores: { ReadableStore<any> }): ReadableStore<boolean>
 	if type(stores) ~= "table" or #stores == 0 then
 		error("Store.AllTruthy: stores must be a non-empty dense array of live Stores")
 	end
 	for i = 1, #stores do
-		if not Store.IsStore(stores[i]) or (records[stores[i]] :: StoreRecord).Destroyed then
+		if not Store.IsStore(stores[i]) or (records[stores[i] :: any] :: StoreRecord).Destroyed then
 			error(`Store.AllTruthy: entry at index {i} is not a live Store`)
 		end
 	end
-	local deps = table.clone(stores)
+	local deps: { ReadableStore<any> } = table.clone(stores)
 	return Store.Derive(function(): boolean
 		for _, s in deps do
-			if not (records[s] :: StoreRecord).Value then return false end
+			if not (records[s :: any] :: StoreRecord).Value then return false end
 		end
 		return true
 	end, deps)
 end
 
-function Store.AnyTruthy(stores: any): any
+function Store.AnyTruthy(stores: { ReadableStore<any> }): ReadableStore<boolean>
 	if type(stores) ~= "table" or #stores == 0 then
 		error("Store.AnyTruthy: stores must be a non-empty dense array of live Stores")
 	end
 	for i = 1, #stores do
-		if not Store.IsStore(stores[i]) or (records[stores[i]] :: StoreRecord).Destroyed then
+		if not Store.IsStore(stores[i]) or (records[stores[i] :: any] :: StoreRecord).Destroyed then
 			error(`Store.AnyTruthy: entry at index {i} is not a live Store`)
 		end
 	end
-	local deps = table.clone(stores)
+	local deps: { ReadableStore<any> } = table.clone(stores)
 	return Store.Derive(function(): boolean
 		for _, s in deps do
-			if (records[s] :: StoreRecord).Value then return true end
+			if (records[s :: any] :: StoreRecord).Value then return true end
 		end
 		return false
 	end, deps)
 end
 
-function Store.Match(source: any, cases: any): any
-	if not Store.IsStore(source) or (records[source] :: StoreRecord).Destroyed then
+function Store.Match<K, V>(source: ReadableStore<K>, cases: { [K]: ReadableStore<V> }): ReadableStore<V>
+	if not Store.IsStore(source) or (records[source :: any] :: StoreRecord).Destroyed then
 		error("Store.Match: source must be a live Store")
 	end
 	if type(cases) ~= "table" then
 		error("Store.Match: cases must be a table")
 	end
-	local deps: { any } = { source }
-	local caseMap: { [any]: any } = {}
+	local deps: { ReadableStore<any> } = { source :: ReadableStore<any> }
+	local caseMap: { [any]: ReadableStore<V> } = {}
 	for k, s in cases do
-		if not Store.IsStore(s) or (records[s] :: StoreRecord).Destroyed then
+		if not Store.IsStore(s) or (records[s :: any] :: StoreRecord).Destroyed then
 			error(`Store.Match: case '{tostring(k)}' is not a live Store`)
 		end
-		table.insert(deps, s)
-		caseMap[k] = s
+		table.insert(deps, s :: ReadableStore<any>)
+		caseMap[k :: any] = s
 	end
-	local srcRec = records[source] :: StoreRecord
-	local initialKey = srcRec.Value
-	local initialCase = caseMap[initialKey] or caseMap["_"]
+	local srcRec = records[source :: any] :: StoreRecord
+	local initialKey = srcRec.Value :: K
+	local initialCase = caseMap[initialKey] or caseMap["_" :: any]
 	if initialCase == nil then
 		error("Store.Match: initial case not found and no default '_' case")
 	end
-	local UNSET: any = {}
-	local lastValue: any = UNSET
-	return Store.Derive(function(): any
-		local key = (records[source] :: StoreRecord).Value
-		local caseStore = caseMap[key] or caseMap["_"]
+	local UNSET = {} :: { [never]: never }
+	local lastValue: V? = nil
+	local hasLast = false
+	return Store.Derive(function(): V
+		local key = (records[source :: any] :: StoreRecord).Value :: K
+		local caseStore = caseMap[key] or caseMap["_" :: any]
 		if caseStore == nil then
 			ErrorHandler.Report({ Module = "Store", Phase = "Match", Error = `no case for key '{tostring(key)}'` })
-			if lastValue ~= UNSET then
-				return lastValue
+			if hasLast then
+				return lastValue :: V
 			end
 			error("Store.Match: no case found")
 		end
-		local v = (records[caseStore] :: StoreRecord).Value
+		local v = (records[caseStore :: any] :: StoreRecord).Value :: V
+		hasLast = true
 		lastValue = v
 		return v
 	end, deps)
 end
 
-function Store.Readonly(store: any): any
-	if not Store.IsStore(store) or (records[store] :: StoreRecord).Destroyed then
+function Store.Readonly<T>(store: ReadableStore<T>): ReadableStore<T>
+	if not Store.IsStore(store) or (records[store :: any] :: StoreRecord).Destroyed then
 		error("Store.Readonly: store must be a live Store")
 	end
-	local srcRec = records[store] :: StoreRecord
+	local srcRec = records[store :: any] :: StoreRecord
 	local h = newHandle("readonly")
 	local rec = records[h] :: StoreRecord
 	rec.Value = srcRec.Value
 	rec.Compute = function(): any
-		return (records[store] :: StoreRecord).Value
+		return (records[store :: any] :: StoreRecord).Value
 	end
-	rec.Deps = { store }
+	rec.Deps = { store :: any }
 	table.insert(srcRec.DerivedConsumers, h)
 	return h
 end
@@ -480,7 +491,7 @@ function storeMethods:Set(value: any): ()
 		error("Store.Set: only writable stores support Set")
 	end
 	local oldValue = r.Value
-	local eq = if r.Equals ~= nil then r.Equals else defaultEquals
+	local eq: (any, any) -> boolean = if r.Equals ~= nil then r.Equals else defaultEquals
 	if eq(oldValue, value) then return end
 	r.Value = value
 	for _, consumer in r.DerivedConsumers do
@@ -664,7 +675,7 @@ end
 
 -- Batch / Transaction
 
-function Store.Batch(block: any): ()
+function Store.Batch(block: () -> ()): ()
 	if type(block) ~= "function" then
 		error("Store.Batch: block must be a function")
 	end
@@ -679,7 +690,7 @@ function Store.Batch(block: any): ()
 	end
 end
 
-function Store.Transaction(block: any): ()
+function Store.Transaction(block: () -> ()): ()
 	if type(block) ~= "function" then
 		error("Store.Transaction: block must be a function")
 	end
@@ -704,24 +715,24 @@ end
 
 export type Snapshot = { [any]: any }
 
-function Store.Snapshot(...: any): Snapshot
+function Store.Snapshot(...: ReadableStore<any>): Snapshot
 	local snap: Snapshot = {}
-	local args = { ... }
+	local args: { ReadableStore<any> } = { ... }
 	for _, s in args do
-		if not Store.IsStore(s) or (records[s] :: StoreRecord).Destroyed then
+		if not Store.IsStore(s) or (records[s :: any] :: StoreRecord).Destroyed then
 			error("Store.Snapshot: all arguments must be live Stores")
 		end
-		local rec = records[s] :: StoreRecord
+		local rec = records[s :: any] :: StoreRecord
 		if rec.Name ~= nil then
 			snap[rec.Name :: string] = rec.Value
 		else
-			snap[s] = rec.Value
+			snap[s :: any] = rec.Value
 		end
 	end
 	return snap
 end
 
-function Store.Restore(snapshot: Snapshot, opts: any?): ()
+function Store.Restore(snapshot: Snapshot, opts: RestoreOptions?): ()
 	local strict = false
 	if opts ~= nil then
 		if type(opts) ~= "table" then
@@ -770,11 +781,11 @@ export type History<T> = {
 	CanRedo: ReadableStore<boolean>,
 }
 
-function Store.History(store: any, limit: number?): any
+function Store.History<T>(store: WritableStore<T>, limit: number?): History<T>
 	if not Store.IsStore(store) then
 		error("Store.History: store must be a writable live Store")
 	end
-	local rec = records[store] :: StoreRecord
+	local rec = records[store :: any] :: StoreRecord
 	if rec.Destroyed or rec.Kind ~= "value" then
 		error("Store.History: store must be a writable live Store")
 	end
@@ -783,23 +794,23 @@ function Store.History(store: any, limit: number?): any
 		error("Store.History: limit must be a positive integer or nil")
 	end
 
-	type HistEntry = { Value: any }
+	type HistEntry = { Value: T }
 	local undoStack: { HistEntry } = {}
 	local redoStack: { HistEntry } = {}
 
-	local canUndo: any = Store.Value(false)
-	local canRedo: any = Store.Value(false)
+	local canUndo: WritableStore<boolean> = Store.Value(false)
+	local canRedo: WritableStore<boolean> = Store.Value(false)
 
 	local suppressing = false
 
 	local function updateFlags(): ()
-		storeMethods.Set(canUndo, #undoStack > 0)
-		storeMethods.Set(canRedo, #redoStack > 0)
+		storeMethods.Set(canUndo :: any, #undoStack > 0)
+		storeMethods.Set(canRedo :: any, #redoStack > 0)
 	end
 
-	local conn = storeMethods.Subscribe(store, function(_new: any, old: any): ()
+	local conn = storeMethods.Subscribe(store :: any, function(_new: T, old: T?): ()
 		if suppressing then return end
-		table.insert(undoStack, { Value = old })
+		table.insert(undoStack, { Value = old :: T })
 		while #undoStack > lim do
 			table.remove(undoStack, 1)
 		end
@@ -813,11 +824,11 @@ function Store.History(store: any, limit: number?): any
 		Undo = function(): boolean
 			if destroyed then return false end
 			if #undoStack == 0 then return false end
-			local entry = table.remove(undoStack, #undoStack)
-			local currentRec = records[store] :: StoreRecord
-			table.insert(redoStack, { Value = currentRec.Value })
+			local entry = table.remove(undoStack, #undoStack) :: HistEntry
+			local currentRec = records[store :: any] :: StoreRecord
+			table.insert(redoStack, { Value = currentRec.Value :: T })
 			suppressing = true
-			storeMethods.Set(store, entry.Value)
+			storeMethods.Set(store :: any, entry.Value)
 			suppressing = false
 			updateFlags()
 			return true
@@ -825,11 +836,11 @@ function Store.History(store: any, limit: number?): any
 		Redo = function(): boolean
 			if destroyed then return false end
 			if #redoStack == 0 then return false end
-			local entry = table.remove(redoStack, #redoStack)
-			local currentRec = records[store] :: StoreRecord
-			table.insert(undoStack, { Value = currentRec.Value })
+			local entry = table.remove(redoStack, #redoStack) :: HistEntry
+			local currentRec = records[store :: any] :: StoreRecord
+			table.insert(undoStack, { Value = currentRec.Value :: T })
 			suppressing = true
-			storeMethods.Set(store, entry.Value)
+			storeMethods.Set(store :: any, entry.Value)
 			suppressing = false
 			updateFlags()
 			return true
@@ -843,8 +854,8 @@ function Store.History(store: any, limit: number?): any
 			if destroyed then return end
 			destroyed = true
 			conn:Disconnect()
-			storeMethods.Destroy(canUndo)
-			storeMethods.Destroy(canRedo)
+			storeMethods.Destroy(canUndo :: any)
+			storeMethods.Destroy(canRedo :: any)
 		end,
 		CanUndo = canUndo,
 		CanRedo = canRedo,
@@ -852,3 +863,4 @@ function Store.History(store: any, limit: number?): any
 end
 
 return Store
+

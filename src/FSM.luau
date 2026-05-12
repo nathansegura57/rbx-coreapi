@@ -53,6 +53,13 @@ export type GuardOptions = {
 	Data: unknown?,
 }
 
+export type FSMTraceEvent = {
+	Event: string,
+	Tag: string?,
+	From: string?,
+	To: string?,
+}
+
 export type Policy = {
 	SingleSwitchPerFrame: boolean,
 	CancelTasksOnExit: boolean,
@@ -187,21 +194,21 @@ type FSMRecord = {
 
 -- ── Private storage ───────────────────────────────────────────────────────────
 
-local fsmRecords: { [any]: FSMRecord } = setmetatable({}, { __mode = "k" } :: any)
-local modeRecords: { [any]: ModeRecord } = setmetatable({}, { __mode = "k" } :: any)
+local fsmRecords: { [any]: FSMRecord } = setmetatable({}, { __mode = "k" }) :: any
+local modeRecords: { [any]: ModeRecord } = setmetatable({}, { __mode = "k" }) :: any
 
 -- ── Tracer ────────────────────────────────────────────────────────────────────
 
-local _tracer: ((any) -> ())? = nil
+local _tracer: ((FSMTraceEvent) -> ())? = nil
 
 local function emitTrace(event: string, fsmRec: FSMRecord, extra: { [string]: any }?)
 	if _tracer == nil then return end
-	local fn = _tracer :: (any) -> ()
+	local fn = _tracer :: (FSMTraceEvent) -> ()
 	local payload: { [string]: any } = { Event = event, Tag = fsmRec.Policy.Tag }
 	if extra then
 		for k, v in extra do payload[k] = v end
 	end
-	ErrorHandler.Protect(function() fn(payload) end, "FSM", "Trace")
+	ErrorHandler.Protect(function() fn(payload :: FSMTraceEvent) end, "FSM", "Trace")
 end
 
 -- ── Metatables ────────────────────────────────────────────────────────────────
@@ -254,7 +261,7 @@ local function makeDefaultPolicy(): PolicyRecord
 	}
 end
 
-local function validateFSMPolicy(policy: any): (boolean, string?)
+local function validateFSMPolicy(policy: PartialPolicy): (boolean, string?)
 	if type(policy) ~= "table" then
 		return false, "policy must be a table"
 	end
@@ -516,7 +523,7 @@ local function enterMode(fsmHandle: any, fsmRec: FSMRecord, modeHandle: any, fra
 				if modeRec.TaskGroupHandle == nil then
 					modeRec.TaskGroupHandle = Task.Group()
 				end
-				modeRec.TaskGroupHandle:Add(result)
+				(modeRec.TaskGroupHandle :: any):Add(result)
 			end
 		end
 	end
@@ -531,7 +538,7 @@ local function enterMode(fsmHandle: any, fsmRec: FSMRecord, modeHandle: any, fra
 				if modeRec.TaskGroupHandle == nil then
 					modeRec.TaskGroupHandle = Task.Group()
 				end
-				modeRec.TaskGroupHandle:Add(result)
+				(modeRec.TaskGroupHandle :: any):Add(result)
 			end
 		end
 	end
@@ -616,7 +623,7 @@ end
 
 local function drainSwitchQueue(fsmHandle: any, fsmRec: FSMRecord)
 	while #fsmRec.SwitchQueue > 0 and not fsmRec.Destroyed and not fsmRec.Disposing do
-		local req = table.remove(fsmRec.SwitchQueue, 1)
+		local req = table.remove(fsmRec.SwitchQueue, 1) :: { name: string, opts: SwitchOptions? }
 		local currentLeaf = fsmRec.ActivePath[#fsmRec.ActivePath] or ""
 		if req.name ~= currentLeaf and fsmRec.Modes[req.name] ~= nil then
 			fsmMethods.Switch(fsmHandle, req.name, req.opts)
@@ -716,7 +723,7 @@ end
 
 local FSM = {} :: any
 
-function FSM.New(ctx: any, opts: PartialPolicy?): any
+function FSM.New<Ctx>(ctx: Context.Context<Ctx> | { [any]: any }, opts: PartialPolicy?): FSM<Ctx>
 	if ctx == nil or (type(ctx) ~= "table" and not Context.IsContext(ctx)) then
 		error("FSM.New: ctx must be a table or Context", 2)
 	end
@@ -727,11 +734,11 @@ function FSM.New(ctx: any, opts: PartialPolicy?): any
 		end
 	end
 
-	local ctxHandle: any
+	local ctxHandle: Context.Context<Ctx>
 	if Context.IsContext(ctx) then
-		ctxHandle = ctx
+		ctxHandle = ctx :: Context.Context<Ctx>
 	else
-		ctxHandle = Context.Root(ctx)
+		ctxHandle = Context.Root(ctx :: { [any]: any }) :: Context.Context<Ctx>
 	end
 
 	local defaults = makeDefaultPolicy()
@@ -789,7 +796,7 @@ function FSM.ValidatePolicy(policy: PartialPolicy): (boolean, string?)
 	return validateFSMPolicy(policy)
 end
 
-function FSM.SetTracer(fn: any): ()
+function FSM.SetTracer(fn: ((FSMTraceEvent) -> ())?): ()
 	if fn ~= nil and type(fn) ~= "function" then
 		error("FSM.SetTracer: fn must be a function or nil", 2)
 	end
@@ -891,7 +898,7 @@ function fsmMethods:Start(name: string): ()
 				if rec.Modes[guardEntry.To] == nil then
 					error(
 						"FSM.Start: guard in mode '" .. modeName
-						.. "' targets unregistered mode '" .. guardEntry.To .. "'",
+							.. "' targets unregistered mode '" .. guardEntry.To .. "'",
 						2
 					)
 				end
@@ -1286,7 +1293,7 @@ function modeMethods:Add(resource: any): any
 		if rec.TaskGroupHandle == nil then
 			rec.TaskGroupHandle = Task.Group()
 		end
-		rec.TaskGroupHandle:Add(resource)
+		(rec.TaskGroupHandle :: any):Add(resource)
 	elseif FSM.IsMode(resource) then
 		local childRec = modeRecords[resource]
 		if childRec == nil then
@@ -1324,7 +1331,7 @@ function modeMethods:Add(resource: any): any
 					if rec.TaskGroupHandle == nil then
 						rec.TaskGroupHandle = Task.Group()
 					end
-					rec.TaskGroupHandle:Add(result)
+					(rec.TaskGroupHandle :: any):Add(result)
 				end
 			end
 		end
@@ -1469,4 +1476,22 @@ FSM.Deferral = table.freeze({
 	Drop = "Drop" :: "Drop",
 })
 
-return FSM
+export type FSMModuleType = {
+	New: <Ctx>(ctx: Context.Context<Ctx> | { [any]: any }, opts: PartialPolicy?) -> FSM<Ctx>,
+	IsFSM: (value: unknown) -> boolean,
+	IsMode: (value: unknown) -> boolean,
+	DefaultPolicy: () -> Policy,
+	ValidatePolicy: (policy: PartialPolicy) -> (boolean, string?),
+	SetTracer: (fn: ((FSMTraceEvent) -> ())?) -> (),
+	ExitOrdering: {
+		LeafFirst: "LeafFirst",
+		ParentFirst: "ParentFirst",
+	},
+	Deferral: {
+		Queue: "Queue",
+		Drop: "Drop",
+	},
+}
+
+return FSM :: FSMModuleType
+

@@ -65,7 +65,7 @@ export type TraceEvent = {
 	Status: Status?,
 }
 
-type GroupOptions = {
+export type GroupOptions = {
 	Name: string?,
 }
 
@@ -101,9 +101,9 @@ type GroupRecord = {
 
 -- ── Private storage ───────────────────────────────────────────────────────────
 
-local taskRecords: { [any]: TaskRecord } = setmetatable({}, { __mode = "k" } :: any)
-local tokenRecords: { [any]: TokenRecord } = setmetatable({}, { __mode = "k" } :: any)
-local groupRecords: { [any]: GroupRecord } = setmetatable({}, { __mode = "k" } :: any)
+local taskRecords: { [any]: TaskRecord } = setmetatable({}, { __mode = "k" }) :: any
+local tokenRecords: { [any]: TokenRecord } = setmetatable({}, { __mode = "k" }) :: any
+local groupRecords: { [any]: GroupRecord } = setmetatable({}, { __mode = "k" }) :: any
 
 -- ── Opaque handle metatables ──────────────────────────────────────────────────
 
@@ -198,7 +198,7 @@ local function runFinallyHandlers(taskHandle: any)
 	for _, entry in handlers do
 		local fn = entry.Fn
 		Scheduler.Defer(function()
-			ErrorHandler.Protect(function() fn(status, value) end, "Task", "Finally")
+			ErrorHandler.Protect(function() fn(status :: any, value) end, "Task", "Finally")
 		end)
 	end
 end
@@ -282,7 +282,7 @@ Task.Backoff = table.freeze({
 
 -- ── Constructors ──────────────────────────────────────────────────────────────
 
-local function spawnTask(taskFn: (token: Token) -> any, opts: TaskOptions?, callerName: string): any
+local function spawnTask<T>(taskFn: (token: Token) -> T, opts: TaskOptions?, callerName: string): Task<T>
 	if type(taskFn) ~= "function" then
 		error(callerName .. ": fn must be a function", 3)
 	end
@@ -291,7 +291,7 @@ local function spawnTask(taskFn: (token: Token) -> any, opts: TaskOptions?, call
 	end
 	local taskName: string? = nil
 	if opts ~= nil then
-		taskName = (opts :: any).Name
+		taskName = opts.Name
 		if taskName ~= nil and type(taskName) ~= "string" then
 			error(callerName .. ": Name must be a string or nil", 3)
 		end
@@ -332,11 +332,11 @@ local function spawnTask(taskFn: (token: Token) -> any, opts: TaskOptions?, call
 	return taskHandle
 end
 
-function Task.Start(fn: (token: Token) -> any, opts: TaskOptions?): any
+function Task.Start<T>(fn: (token: Token) -> T, opts: TaskOptions?): Task<T>
 	return spawnTask(fn, opts, "Task.Start")
 end
 
-function Task.Delay(seconds: number, fn: (() -> any)?): any
+function Task.Delay(seconds: number, fn: (() -> any)?): Task<any>
 	if type(seconds) ~= "number" or not (seconds >= 0) then
 		error("Task.Delay: seconds must be non-negative", 2)
 	end
@@ -437,7 +437,7 @@ function Task.Sleep(seconds: number, token: Token?): (boolean, string?)
 	return coroutine.yield() :: any
 end
 
-function Task.Resolved(value: any): any
+function Task.Resolved<T>(value: T): Task<T>
 	local tokenRec: TokenRecord = {
 		Cancelled = false,
 		Reason = nil,
@@ -459,7 +459,7 @@ function Task.Resolved(value: any): any
 	return newTaskHandle(taskRec)
 end
 
-function Task.Rejected(errorValue: unknown): any
+function Task.Rejected(errorValue: unknown): Task<never>
 	local tokenRec: TokenRecord = {
 		Cancelled = false,
 		Reason = nil,
@@ -481,7 +481,7 @@ function Task.Rejected(errorValue: unknown): any
 	return newTaskHandle(taskRec)
 end
 
-function Task.Cancelled(reason: string?): any
+function Task.Cancelled(reason: string?): Task<never>
 	local tokenRec: TokenRecord = {
 		Cancelled = true,
 		Reason = reason,
@@ -535,22 +535,23 @@ local function newManualTask(name: string?): (any, (status: Status, hasVal: bool
 	return taskHandle, settle
 end
 
-function Task.Timeout(inner: any, seconds: number, reason: string?): any
+function Task.Timeout<T>(inner: Task<T> | (() -> Task<T>), seconds: number, reason: string?): Task<T>
 	if type(seconds) ~= "number" or seconds <= 0 then
 		error("Task.Timeout: seconds must be positive", 2)
 	end
-	local innerTask: any
+	local innerTask: Task<T>
 	if type(inner) == "function" then
-		local ok, result = pcall(inner)
+		local thunk = inner :: () -> Task<T>
+		local ok, result = pcall(thunk)
 		if not ok then
 			error("Task.Timeout: thunk errored: " .. tostring(result), 2)
 		end
-		innerTask = result
-		if not isTaskHandle(innerTask) then
+		if not isTaskHandle(result) then
 			error("Task.Timeout: thunk must return a Task", 2)
 		end
+		innerTask = result :: Task<T>
 	elseif isTaskHandle(inner) then
-		innerTask = inner
+		innerTask = inner :: Task<T>
 	else
 		error("Task.Timeout: inner must be a Task or function returning a Task", 2)
 	end
@@ -567,18 +568,18 @@ function Task.Timeout(inner: any, seconds: number, reason: string?): any
 		settle("Cancelled", false, nil, timeoutReason)
 	end)
 
-	innerTask:Finally(function(status: Status, value: unknown?)
+	innerTask:Finally(function(status: Status, _value: unknown?)
 		if done then return end
 		done = true
 		Scheduler.Cancel(timerHandle)
 		if status == "Fulfilled" then
-			local rec = taskRecords[innerTask]
+			local rec = taskRecords[innerTask :: any]
 			settle("Fulfilled", rec.HasResult, rec.ResultValue, nil)
 		elseif status == "Errored" then
-			local rec = taskRecords[innerTask]
+			local rec = taskRecords[innerTask :: any]
 			settle("Errored", rec.HasError, rec.ErrorValue, nil)
 		else
-			local rec = taskRecords[innerTask]
+			local rec = taskRecords[innerTask :: any]
 			settle("Cancelled", false, nil, rec.Reason)
 		end
 	end)
@@ -586,14 +587,14 @@ function Task.Timeout(inner: any, seconds: number, reason: string?): any
 	return outerHandle
 end
 
-function Task.Retry(makeTask: (token: Token) -> any, opts: RetryOptions): any
+function Task.Retry<T>(makeTask: (token: Token) -> Task<T>, opts: RetryOptions): Task<T>
 	if type(opts) ~= "table" then
 		error("Task.Retry: opts must be a table", 2)
 	end
-	local count = (opts :: any).Count
-	local backoff = (opts :: any).Backoff
-	local base = (opts :: any).Base
-	local jitter = (opts :: any).Jitter
+	local count = opts.Count
+	local backoff = opts.Backoff
+	local base = opts.Base
+	local jitter = opts.Jitter
 
 	if type(count) ~= "number" or count < 1 or math.floor(count) ~= count then
 		error("Task.Retry: Count must be a positive integer", 2)
@@ -715,7 +716,7 @@ function Task.Retry(makeTask: (token: Token) -> any, opts: RetryOptions): any
 	return outerHandle
 end
 
-function Task.All(tasks: { Task<any> }): any
+function Task.All<T>(tasks: { Task<T> }): Task<{ T }>
 	if type(tasks) ~= "table" then
 		error("Task.All: tasks must be a non-empty dense array", 2)
 	end
@@ -789,7 +790,7 @@ function Task.All(tasks: { Task<any> }): any
 	return outerHandle
 end
 
-function Task.Race(tasks: { Task<any> }): any
+function Task.Race<T>(tasks: { Task<T> }): Task<T>
 	if type(tasks) ~= "table" then
 		error("Task.Race: tasks must be a non-empty dense array", 2)
 	end
@@ -836,7 +837,7 @@ function Task.Race(tasks: { Task<any> }): any
 	return outerHandle
 end
 
-function Task.Any(tasks: { Task<any> }): any
+function Task.Any<T>(tasks: { Task<T> }): Task<T>
 	if type(tasks) ~= "table" then
 		error("Task.Any: tasks must be a non-empty dense array", 2)
 	end
@@ -901,7 +902,7 @@ function Task.Any(tasks: { Task<any> }): any
 	return outerHandle
 end
 
-function Task.AllSettled(tasks: { Task<any> }): any
+function Task.AllSettled(tasks: { Task<any> }): Task<{ SettledResult }>
 	if type(tasks) ~= "table" then
 		error("Task.AllSettled: tasks must be a non-empty dense array", 2)
 	end
@@ -952,7 +953,7 @@ function Task.AllSettled(tasks: { Task<any> }): any
 	return outerHandle
 end
 
-function Task.FromRoblox(rbxSignal: RBXScriptSignal, untilSignal: RBXScriptSignal?): any
+function Task.FromRoblox(rbxSignal: RBXScriptSignal, untilSignal: RBXScriptSignal?): Task<{ any }>
 	if typeof(rbxSignal) ~= "RBXScriptSignal" then
 		error("Task.FromRoblox: rbxSignal must be an RBXScriptSignal", 2)
 	end
@@ -1004,13 +1005,13 @@ end
 
 -- ── Group ─────────────────────────────────────────────────────────────────────
 
-function Task.Group(opts: GroupOptions?): any
+function Task.Group(opts: GroupOptions?): TaskGroup
 	if opts ~= nil and type(opts) ~= "table" then
 		error("Task.Group: opts must be a table or nil", 2)
 	end
 	local name: string? = nil
 	if opts ~= nil then
-		name = (opts :: any).Name
+		name = opts.Name
 		if name ~= nil and type(name) ~= "string" then
 			error("Task.Group: Name must be a string or nil", 2)
 		end
@@ -1137,7 +1138,7 @@ function taskMethods:Finally(fn: (status: Status, value: unknown?) -> ()): any
 			value = rec.Reason
 		end
 		Scheduler.Defer(function()
-			ErrorHandler.Protect(function() fn(status, value) end, "Task", "Finally")
+			ErrorHandler.Protect(function() fn(status :: any, value) end, "Task", "Finally")
 		end)
 	end
 	return self
@@ -1418,4 +1419,45 @@ function groupMethods:Name(): string?
 	return rec.Name
 end
 
-return Task
+export type TaskModuleType = {
+	Reason: {
+		ModeExit: "ModeExit",
+		GuardFalse: "GuardFalse",
+		Superseded: "Superseded",
+		Timeout: "Timeout",
+		User: "User",
+		Shutdown: "Shutdown",
+		Capacity: "Capacity",
+	},
+	Status: {
+		Pending: "Pending",
+		Fulfilled: "Fulfilled",
+		Cancelled: "Cancelled",
+		Errored: "Errored",
+	},
+	Backoff: {
+		Fixed: "Fixed",
+		Expo: "Expo",
+	},
+	Start: <T>(fn: (token: Token) -> T, opts: TaskOptions?) -> Task<T>,
+	Delay: (seconds: number, fn: (() -> any)?) -> Task<any>,
+	Sleep: (seconds: number, token: Token?) -> (boolean, string?),
+	Resolved: <T>(value: T) -> Task<T>,
+	Rejected: (errorValue: unknown) -> Task<never>,
+	Cancelled: (reason: string?) -> Task<never>,
+	Timeout: <T>(inner: Task<T> | (() -> Task<T>), seconds: number, reason: string?) -> Task<T>,
+	Retry: <T>(makeTask: (token: Token) -> Task<T>, opts: RetryOptions) -> Task<T>,
+	All: <T>(tasks: { Task<T> }) -> Task<{ T }>,
+	Race: <T>(tasks: { Task<T> }) -> Task<T>,
+	Any: <T>(tasks: { Task<T> }) -> Task<T>,
+	AllSettled: (tasks: { Task<any> }) -> Task<{ SettledResult }>,
+	FromRoblox: (rbxSignal: RBXScriptSignal, untilSignal: RBXScriptSignal?) -> Task<{ any }>,
+	Group: (opts: GroupOptions?) -> TaskGroup,
+	IsTask: (value: unknown) -> boolean,
+	IsToken: (value: unknown) -> boolean,
+	IsGroup: (value: unknown) -> boolean,
+	SetTracer: (fn: ((TraceEvent) -> ())?) -> (),
+}
+
+return Task :: TaskModuleType
+

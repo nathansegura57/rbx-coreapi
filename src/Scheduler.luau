@@ -78,7 +78,7 @@ function Scheduler.Defer(fn: () -> ()): any?
 		error("Scheduler.Defer: fn must be a function")
 	end
 	local wrapped: () -> () = function()
-		local ok, err = pcall(fn :: any)
+		local ok, err = pcall(fn)
 		if not ok then
 			reportCallbackError("Defer", err)
 		end
@@ -94,7 +94,7 @@ function Scheduler.Delay(seconds: number, fn: () -> ()): any?
 		error("Scheduler.Delay: fn must be a function")
 	end
 	local wrapped: () -> () = function()
-		local ok, err = pcall(fn :: any)
+		local ok, err = pcall(fn)
 		if not ok then
 			reportCallbackError("Delay", err)
 		end
@@ -106,14 +106,14 @@ function Scheduler.Cancel(handle: any?): ()
 	if handle == nil then
 		return
 	end
-	local ok, err = pcall(activeDriver.Cancel :: any, handle)
+	local ok, err = pcall(activeDriver.Cancel, handle)
 	if not ok then
 		reportCallbackError("Cancel", err)
 	end
 end
 
 function Scheduler.Now(): number
-	local ok, result = pcall(activeDriver.Now :: any)
+	local ok, result = pcall(activeDriver.Now)
 	if not ok then
 		-- Route error; if policy is Throw, Report throws and propagates from Now().
 		reportCallbackError("Now", result)
@@ -135,7 +135,7 @@ function Scheduler.OnStep(fn: (dt: number) -> ()): Connection.Connection
 		error("Scheduler.OnStep: no step driver available")
 	end
 	local wrapped: (number) -> () = function(dt: number)
-		local ok, err = pcall(fn :: any, dt)
+		local ok, err = pcall(fn, dt)
 		if not ok then
 			reportCallbackError("OnStep", err)
 		end
@@ -148,7 +148,7 @@ function Scheduler.OnStep(fn: (dt: number) -> ()): Connection.Connection
 end
 
 function Scheduler.SetDriver(driver: Driver): ()
-	local raw: any = driver
+	local raw = driver :: { [string]: unknown }
 	if type(raw) ~= "table" then
 		error("Scheduler.SetDriver: driver must be a table")
 	end
@@ -161,11 +161,11 @@ function Scheduler.SetDriver(driver: Driver): ()
 	end
 	-- Build new active driver, keeping defaults for any omitted fields.
 	activeDriver = {
-		Defer = if raw.Defer ~= nil then raw.Defer else defaultDriver.Defer,
-		Delay = if raw.Delay ~= nil then raw.Delay else defaultDriver.Delay,
-		Cancel = if raw.Cancel ~= nil then raw.Cancel else defaultDriver.Cancel,
-		Now = if raw.Now ~= nil then raw.Now else defaultDriver.Now,
-		OnStep = if raw.OnStep ~= nil then raw.OnStep else defaultDriver.OnStep,
+		Defer = if driver.Defer ~= nil then driver.Defer else defaultDriver.Defer,
+		Delay = if driver.Delay ~= nil then driver.Delay else defaultDriver.Delay,
+		Cancel = if driver.Cancel ~= nil then driver.Cancel else defaultDriver.Cancel,
+		Now = if driver.Now ~= nil then driver.Now else defaultDriver.Now,
+		OnStep = if driver.OnStep ~= nil then driver.OnStep else defaultDriver.OnStep,
 	}
 end
 
@@ -174,3 +174,4 @@ function Scheduler.ResetDriver(): ()
 end
 
 return Scheduler
+

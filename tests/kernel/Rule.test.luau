@@ -546,4 +546,67 @@ suite:Test("SetTracer installs tracer receiving Rule.Enable and Rule.Disable", f
 	sig:Destroy()
 end)
 
+-- ── Pathological coverage ────────────────────────────────────────────────────
+
+suite:Test("Debounce preserves an explicit nil payload", function(ctx)
+	local sig = Signal.New()
+	local received = "unset" :: any
+	local rule = Rule.New("nilDebounce")
+	rule:On(sig):Policy({ Debounce = 1 }):Run(function(_c, payload, _f)
+		received = payload
+	end):Enable()
+	sig:Fire(nil)
+	ctx.Mock:Advance(1)
+	ctx:Expect(received):ToBe(nil)
+	rule:Destroy()
+	sig:Destroy()
+end)
+
+suite:Test("Concat with Overflow=Latest keeps only newest queued payload", function(ctx)
+	local sig = Signal.New()
+	local seen: { string } = {}
+	local rule = Rule.New("concatLatest")
+	rule:On(sig):Policy({
+		Concurrency = Rule.Concurrency.Concat,
+		Capacity = 1,
+		Overflow = Rule.Overflow.Latest,
+		Schedule = Rule.Schedule.Immediate,
+	}):Run(function(_c, payload, _f)
+		table.insert(seen, payload)
+		return Task.Delay(1)
+	end):Enable()
+	sig:Fire("a")
+	sig:Fire("b")
+	sig:Fire("c")
+	ctx:Expect(seen):ToEqual({ "a" })
+	ctx.Mock:Advance(1)
+	ctx.Mock:Flush()
+	ctx:Expect(seen):ToEqual({ "a", "c" })
+	rule:Destroy()
+	sig:Destroy()
+end)
+
+suite:Test("CancelTasksWhenGuardFalse cancels in-flight task when store guard flips false", function(ctx)
+	local sig = Signal.New()
+	local guard = Store.Value(true)
+	local returnedTask: any = nil
+	local rule = Rule.New("cancelOnGuard")
+	rule:On(sig):When(guard):Policy({
+		CancelTasksWhenGuardFalse = true,
+		Schedule = Rule.Schedule.Immediate,
+	}):Run(function(_c, _payload, _f)
+		returnedTask = Task.Delay(10)
+		return returnedTask
+	end):Enable()
+	sig:Fire(nil)
+	ctx:Expect(returnedTask:IsPending()):ToBe(true)
+	guard:Set(false)
+	ctx.Mock:Flush()
+	ctx:Expect(returnedTask:IsCancelled()):ToBe(true)
+	ctx:Expect(returnedTask:Token():Reason()):ToBe(Task.Reason.GuardFalse)
+	rule:Destroy()
+	sig:Destroy()
+	guard:Destroy()
+end)
+
 return suite:Run()
