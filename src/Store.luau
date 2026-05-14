@@ -356,7 +356,7 @@ function Store.Combine<T>(values: { ReadableStore<T> } | { [string]: ReadableSto
 				error(`Store.Combine: value for key '{tostring(k)}' is not a live Store`)
 			end
 			table.insert(keys, k :: string)
-			table.insert(depList, s)
+			table.insert(depList, s :: any)
 		end
 		local storeMap: { [string]: ReadableStore<any> } = table.clone(raw) :: { [string]: ReadableStore<any> }
 		return Store.Derive(function(): { T }
@@ -419,7 +419,7 @@ function Store.Match<K, V>(source: ReadableStore<K>, cases: { [K]: ReadableStore
 			error(`Store.Match: case '{tostring(k)}' is not a live Store`)
 		end
 		table.insert(deps, s :: ReadableStore<any>)
-		caseMap[k :: any] = s
+		caseMap[k :: any] = s :: any
 	end
 	local srcRec = records[source :: any] :: StoreRecord
 	local initialKey = srcRec.Value :: K

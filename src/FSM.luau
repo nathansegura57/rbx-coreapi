@@ -266,7 +266,7 @@ local function validateFSMPolicy(policy: PartialPolicy): (boolean, string?)
 		return false, "policy must be a table"
 	end
 	for k in policy do
-		if not KNOWN_FSM_POLICY_KEYS[k] then
+		if not KNOWN_FSM_POLICY_KEYS[k :: any] then
 			return false, "unknown policy key: " .. tostring(k)
 		end
 	end
@@ -773,7 +773,7 @@ function FSM.New<Ctx>(ctx: Context.Context<Ctx> | { [any]: any }, opts: PartialP
 
 	local handle = setmetatable({}, fsmMeta)
 	fsmRecords[handle] = rec
-	return handle
+	return handle :: any
 end
 
 function FSM.IsFSM(value: unknown): boolean

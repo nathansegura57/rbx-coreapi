@@ -219,7 +219,7 @@ local function validatePolicy(policy: PartialPolicy): (boolean, string?)
 		return false, "policy must be a table"
 	end
 	for k in policy do
-		if not KNOWN_POLICY_KEYS[k] then
+		if not KNOWN_POLICY_KEYS[k :: any] then
 			return false, "unknown policy key: " .. tostring(k)
 		end
 	end
@@ -749,7 +749,7 @@ function Rule.New<Ctx, Payload>(name: string): Rule<Ctx, Payload>
 	}
 	local handle = setmetatable({}, ruleMeta)
 	ruleRecords[handle] = rec
-	return handle
+	return handle :: any
 end
 
 function Rule.IsRule(value: unknown): boolean

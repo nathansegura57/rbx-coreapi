@@ -2,73 +2,184 @@
 
 local ErrorHandler = require(script.Parent.ErrorHandler)
 
-local Connection = {}
+
+export type DisconnectCallback = () -> ()
 
 export type Connection = {
 	Connected: boolean,
 	Disconnect: (self: Connection) -> (),
 }
 
-type Record = {
-	Connected: boolean,
-	DisconnectFn: (() -> ())?,
+export type ConnectionModule = {
+	New: (disconnectCallback: DisconnectCallback?) -> Connection,
+	IsConnection: (value: unknown) -> boolean,
 }
 
--- Weak keys: records are kept as long as the handle has a strong reference.
-local records: { [any]: Record } = setmetatable({}, { __mode = "k" }) :: any
 
-local function disconnect(self: Connection): ()
-	local record: Record? = records[self :: any]
-	if record == nil then
-		error("Connection.Disconnect: invalid connection")
-	end
-	if not record.Connected then
-		return
-	end
-	-- Set Connected = false before running DisconnectFn.
-	record.Connected = false
-	local fn = record.DisconnectFn
-	-- Clear before calling so it cannot run twice, even if Report throws.
-	record.DisconnectFn = nil
-	if fn ~= nil then
-		ErrorHandler.Protect(fn, "Connection", "Disconnect")
-	end
-end
+local Connection = {} :: ConnectionModule
+local ConnectionHandleMethods = {}
 
-local handleMeta = {
-	__index = function(self: any, key: string): any
-		if key == "Connected" then
-			local record: Record? = records[self]
-			return if record ~= nil then record.Connected else false
-		elseif key == "Disconnect" then
-			return disconnect
-		end
-		return nil
-	end,
-	__newindex = function(_self: any, key: string, _value: any): ()
-		error(`Connection: '{tostring(key)}' is read-only`)
-	end,
-	__metatable = "Connection",
+
+type ConnectionPrivateState = {
+	IsConnected: boolean,
+	DisconnectCallback: DisconnectCallback?,
 }
 
-function Connection.New(disconnectFn: (() -> ())?): Connection
-	if disconnectFn ~= nil and type(disconnectFn) ~= "function" then
-		error("Connection.New: disconnectFn must be a function or nil")
-	end
-	local handle: any = setmetatable({}, handleMeta)
-	records[handle] = {
-		Connected = true,
-		DisconnectFn = disconnectFn,
-	}
-	return handle :: Connection
+type ConnectionPrivateStateByHandle = {
+	[Connection]: ConnectionPrivateState,
+}
+
+type ConnectionHandleMetatable = {
+	__index: (connectionHandle: Connection, key: string) -> unknown,
+	__newindex: (connectionHandle: Connection, key: string, value: unknown) -> never,
+	__metatable: string,
+}
+
+
+local connectionPrivateStateByHandle: ConnectionPrivateStateByHandle = setmetatable({}, {
+	__mode = "k",
+}) :: any
+
+local ConnectionHandleMetatable: ConnectionHandleMetatable
+
+
+function Connection.New(disconnectCallback: DisconnectCallback?): Connection
+	local validatedDisconnectCallback = getValidatedDisconnectCallback(disconnectCallback)
+	local connectionHandle = createConnectionHandle()
+
+	connectionPrivateStateByHandle[connectionHandle] = createConnectionPrivateState(validatedDisconnectCallback)
+
+	return connectionHandle
 end
 
 function Connection.IsConnection(value: unknown): boolean
-	if type(value) ~= "table" then
-		return false
-	end
-	return records[value :: any] ~= nil
+	return valueIsConnectionHandle(value)
 end
 
-return Connection
+
+function ConnectionHandleMethods.Disconnect(connectionHandle: Connection): ()
+	local connectionPrivateState = getConnectionPrivateStateOrRaiseInvalidHandleError(connectionHandle)
+
+	disconnectConnectionIfStillConnected(connectionHandle, connectionPrivateState)
+end
+
+
+function createConnectionHandle(): Connection
+	return setmetatable({}, ConnectionHandleMetatable) :: any
+end
+
+function createConnectionPrivateState(disconnectCallback: DisconnectCallback?): ConnectionPrivateState
+	return {
+		IsConnected = true,
+		DisconnectCallback = disconnectCallback,
+	}
+end
+
+
+function valueIsConnectionHandle(value: unknown): boolean
+	return getConnectionPrivateStateIfValueIsConnectionHandle(value) ~= nil
+end
+
+function getConnectionPrivateStateIfValueIsConnectionHandle(value: unknown): ConnectionPrivateState?
+	if typeof(value) ~= "table" then
+		return nil
+	end
+
+	return connectionPrivateStateByHandle[value :: Connection]
+end
+
+function getConnectionPrivateStateOrRaiseInvalidHandleError(connectionHandle: Connection): ConnectionPrivateState
+	local connectionPrivateState = connectionPrivateStateByHandle[connectionHandle]
+
+	if connectionPrivateState ~= nil then
+		return connectionPrivateState
+	end
+
+	return raiseConnectionUsageError("Connection.Disconnect: invalid connection handle")
+end
+
+
+function getConnectionHandlePublicProperty(connectionHandle: Connection, key: string): unknown
+	if key == "Connected" then
+		return getCurrentConnectedState(connectionHandle)
+	end
+
+	if key == "Disconnect" then
+		return ConnectionHandleMethods.Disconnect
+	end
+
+	return nil
+end
+
+function rejectConnectionHandlePublicMutation(_connectionHandle: Connection, key: string, _value: unknown): never
+	return raiseConnectionUsageError(`Connection: '{tostring(key)}' is read-only`)
+end
+
+
+function getCurrentConnectedState(connectionHandle: Connection): boolean
+	local connectionPrivateState = connectionPrivateStateByHandle[connectionHandle]
+
+	if connectionPrivateState == nil then
+		return false
+	end
+
+	return connectionPrivateState.IsConnected
+end
+
+function disconnectConnectionIfStillConnected(
+	_connectionHandle: Connection,
+	connectionPrivateState: ConnectionPrivateState
+): ()
+	if not connectionPrivateState.IsConnected then
+		return
+	end
+
+	connectionPrivateState.IsConnected = false
+
+	local disconnectCallback = takeDisconnectCallbackFromConnectionPrivateState(connectionPrivateState)
+
+	if disconnectCallback ~= nil then
+		runDisconnectCallbackThroughErrorHandler(disconnectCallback)
+	end
+end
+
+function takeDisconnectCallbackFromConnectionPrivateState(
+	connectionPrivateState: ConnectionPrivateState
+): DisconnectCallback?
+	local disconnectCallback = connectionPrivateState.DisconnectCallback
+	connectionPrivateState.DisconnectCallback = nil
+
+	return disconnectCallback
+end
+
+function runDisconnectCallbackThroughErrorHandler(disconnectCallback: DisconnectCallback): ()
+	ErrorHandler.Protect(disconnectCallback, "Connection", "Disconnect")
+end
+
+
+function getValidatedDisconnectCallback(untrustedDisconnectCallback: unknown?): DisconnectCallback?
+	if untrustedDisconnectCallback == nil then
+		return nil
+	end
+
+	if typeof(untrustedDisconnectCallback) == "function" then
+		return untrustedDisconnectCallback :: DisconnectCallback
+	end
+
+	return raiseConnectionUsageError("Connection.New: disconnectCallback must be a function or nil")
+end
+
+function raiseConnectionUsageError(message: string): never
+	error(message, 3)
+end
+
+
+ConnectionHandleMetatable = table.freeze({
+	__index = getConnectionHandlePublicProperty,
+	__newindex = rejectConnectionHandlePublicMutation,
+	__metatable = "Connection",
+})
+
+
+return table.freeze(Connection)
 

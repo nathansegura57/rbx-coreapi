@@ -1,8 +1,8 @@
 --!strict
 
-local Connection = require(script.Parent.Parent.src.Connection)
-local ErrorHandler = require(script.Parent.Parent.src.ErrorHandler)
-local Scheduler = require(script.Parent.Parent.src.Scheduler)
+local Connection = require(script.Parent.Parent.Kernel.Connection)
+local ErrorHandler = require(script.Parent.Parent.Kernel.ErrorHandler)
+local Scheduler = require(script.Parent.Parent.Kernel.Scheduler)
 
 -- ── Exported types ─────────────────────────────────────────────────────────────
 
@@ -719,7 +719,7 @@ function suiteMethods:Run(): SuiteReport
 		end
 
 		mock:Uninstall()
-		ErrorHandler.SetPolicy(prevPolicy)
+		ErrorHandler.SetPolicy(prevPolicy :: any)
 
 		if testOk then
 			report.passed += 1
@@ -781,3 +781,4 @@ function TestKit.TraceCapture(setTracer: ((any) -> ()) -> ()): TraceCapture
 end
 
 return TestKit
+

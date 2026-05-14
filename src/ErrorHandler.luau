@@ -1,134 +1,369 @@
 --!strict
 
-local ErrorHandler = {}
+local NoErrorSentinel = table.freeze({
+	Kind = "ErrorHandler.NoError" :: "ErrorHandler.NoError",
+})
+
+local ErrorHandlerModuleSource = debug.info(1, "s") :: string
+local MaximumStackLevelsToInspect = 64
+
+export type NoErrorSentinel = typeof(NoErrorSentinel)
+export type ReportedError = unknown
 
 export type Policy = "Throw" | "Warn" | "Swallow" | "Collect"
 
-export type ErrorInfo = {
-	Phase: string,
-	Module: string,
-	Name: string?,
-	Message: string?,
-	Error: unknown,
+export type PolicySet = {
+	Throw: "Throw",
+	Warn: "Warn",
+	Swallow: "Swallow",
+	Collect: "Collect",
 }
 
--- Enum table: users reference ErrorHandler.Policy.Throw etc. instead of raw strings.
-local _policyEnum = table.freeze({
+export type ErrorInfo = {
+	Module: string,
+	Phase: string,
+	Name: string?,
+	Message: string?,
+	Error: ReportedError,
+}
+
+export type Reporter = (errorInfo: ErrorInfo) -> ()
+
+export type ErrorHandlerModule = {
+	Policy: PolicySet,
+	NoError: NoErrorSentinel,
+
+	SetPolicy: (policy: Policy) -> (),
+	GetPolicy: () -> Policy,
+
+	SetReporter: (reporter: Reporter?) -> (),
+	GetReporter: () -> Reporter?,
+
+	Report: (errorInfo: ErrorInfo) -> (),
+	Protect: <Result>(callback: (() -> Result) | (() -> ()), moduleName: string, phaseName: string, errorName: string?) -> (boolean, Result?, ReportedError?),
+
+	TakeCollected: () -> { ErrorInfo },
+	ClearCollected: () -> (),
+}
+
+local ErrorHandler = {} :: ErrorHandlerModule
+
+
+local Policy: PolicySet = table.freeze({
 	Throw = "Throw" :: "Throw",
 	Warn = "Warn" :: "Warn",
 	Swallow = "Swallow" :: "Swallow",
 	Collect = "Collect" :: "Collect",
 })
 
-local VALID_POLICIES: { [string]: boolean } = {
-	Throw = true,
-	Warn = true,
-	Swallow = true,
-	Collect = true,
-}
+local activePolicy: Policy = Policy.Throw
+local activeReporter: Reporter? = nil
+local collectedErrorInfoList: { ErrorInfo } = {}
+local reporterIsCurrentlyHandlingAnError = false
 
-local _policy: Policy = "Throw"
-local _reporter: ((ErrorInfo) -> ())? = nil
-local _collected: { ErrorInfo } = {}
-local _reporterRunning = false
 
-local function buildMessage(info: ErrorInfo): string
-	local location = if info.Name ~= nil
-		then `{info.Module}.{info.Phase}[{info.Name}]`
-		else `{info.Module}.{info.Phase}`
-	local message = if info.Message ~= nil
-		then info.Message
-		else tostring(info.Error)
-	return `{location}: {message}`
-end
+ErrorHandler.Policy = Policy
+ErrorHandler.NoError = NoErrorSentinel
+
 
 function ErrorHandler.SetPolicy(policy: Policy): ()
-	if VALID_POLICIES[policy] ~= true then
-		error(`ErrorHandler.SetPolicy: invalid policy '{tostring(policy)}'`)
-	end
-	_policy = policy
+	activePolicy = getValidatedPolicy(policy)
 end
 
 function ErrorHandler.GetPolicy(): Policy
-	return _policy
+	return activePolicy
 end
 
-function ErrorHandler.SetReporter(fn: ((ErrorInfo) -> ())?): ()
-	if fn ~= nil and type(fn) ~= "function" then
-		error("ErrorHandler.SetReporter: reporter must be a function or nil")
-	end
-	_reporter = fn
+
+function ErrorHandler.SetReporter(reporter: Reporter?): ()
+	activeReporter = getValidatedReporter(reporter)
 end
 
-function ErrorHandler.Report(info: ErrorInfo): ()
-	-- Cast to untyped map for runtime validation: callers may bypass the type checker.
-	local untyped = info :: { [string]: unknown }
-	if type(untyped) ~= "table" then
-		error("ErrorHandler.Report: info must be a table")
-	end
-	if type(untyped.Phase) ~= "string" then
-		error("ErrorHandler.Report: Phase must be a string")
-	end
-	if type(untyped.Module) ~= "string" then
-		error("ErrorHandler.Report: Module must be a string")
-	end
-	-- Iterate keys to distinguish "Error key absent" from "Error = nil" (rawget cannot).
-	local hasErrorKey = false
-	for k in untyped do
-		if k == "Error" then
-			hasErrorKey = true
-			break
-		end
-	end
-	if not hasErrorKey then
-		error("ErrorHandler.Report: Error is required")
-	end
-	if untyped.Name ~= nil and type(untyped.Name) ~= "string" then
-		error("ErrorHandler.Report: Name must be a string or nil")
-	end
-	if untyped.Message ~= nil and type(untyped.Message) ~= "string" then
-		error("ErrorHandler.Report: Message must be a string or nil")
-	end
-
-	local reporter = _reporter
-	if reporter ~= nil and not _reporterRunning then
-		_reporterRunning = true
-		local ok, err = pcall(reporter, info)
-		_reporterRunning = false
-		if not ok then
-			warn(`ErrorHandler: reporter failed: {tostring(err)}`)
-		end
-	end
-
-	local policy = _policy
-	if policy == "Throw" then
-		error(buildMessage(info))
-	elseif policy == "Warn" then
-		warn(buildMessage(info))
-	elseif policy == "Collect" then
-		table.insert(_collected, info)
-	end
-	-- "Swallow": nothing after reporter
+function ErrorHandler.GetReporter(): Reporter?
+	return activeReporter
 end
 
--- Runs fn(); if it errors, routes through Report and returns (false, err).
--- Returns (true, result) on success. Useful when the return value matters.
-function ErrorHandler.Protect<T>(fn: () -> T, module: string, phase: string, name: string?): (boolean, T)
-	local ok, result = pcall(fn)
-	if not ok then
-		ErrorHandler.Report({ Module = module, Phase = phase, Name = name, Error = result })
-		return false, result :: any
-	end
-	return true, result
+
+function ErrorHandler.Report(errorInfo: ErrorInfo): ()
+	local validatedErrorInfo = getValidatedErrorInfo(errorInfo)
+
+	callActiveReporterWithoutAllowingRecursiveReporterFailures(validatedErrorInfo)
+	applyActivePolicyToErrorInfo(validatedErrorInfo)
 end
+
+function ErrorHandler.Protect<Result>(
+	callback: (() -> Result) | (() -> ()),
+	moduleName: string,
+	phaseName: string,
+	errorName: string?
+): (boolean, Result?, ReportedError?)
+	local callbackSucceeded, callbackResultOrError = pcall(callback)
+
+	if callbackSucceeded then
+		return true, callbackResultOrError :: Result, nil
+	end
+
+	ErrorHandler.Report({
+		Module = moduleName,
+		Phase = phaseName,
+		Name = errorName,
+		Error = callbackResultOrError,
+	})
+
+	return false, nil, callbackResultOrError
+end
+
 
 function ErrorHandler.TakeCollected(): { ErrorInfo }
-	local result = _collected
-	_collected = {}
-	return result
+	local collectedErrorInfoSnapshotList = collectedErrorInfoList
+	collectedErrorInfoList = {}
+
+	return collectedErrorInfoSnapshotList
 end
 
-ErrorHandler.Policy = _policyEnum
+function ErrorHandler.ClearCollected(): ()
+	collectedErrorInfoList = {}
+end
 
-return ErrorHandler
+
+function raiseErrorHandlerUsageError(message: string): never
+	error(message, getErrorLevelForFirstCallerOutsideErrorHandlerModule())
+end
+
+function getErrorLevelForFirstCallerOutsideErrorHandlerModule(): number
+	local firstStackLevelOutsideThisHelper = 2
+	local firstStackLevelOutsideErrorHandlerModule = 3
+
+	for inspectedStackLevel = firstStackLevelOutsideErrorHandlerModule, MaximumStackLevelsToInspect do
+		local inspectedSource = debug.info(inspectedStackLevel, "s")
+
+		if inspectedSource == nil then
+			return firstStackLevelOutsideThisHelper
+		end
+
+		if inspectedSource ~= ErrorHandlerModuleSource then
+			return inspectedStackLevel - 1
+		end
+	end
+
+	return firstStackLevelOutsideThisHelper
+end
+
+
+function getValidatedPolicy(untrustedPolicy: unknown): Policy
+	if untrustedPolicy == Policy.Throw then
+		return Policy.Throw
+	end
+
+	if untrustedPolicy == Policy.Warn then
+		return Policy.Warn
+	end
+
+	if untrustedPolicy == Policy.Swallow then
+		return Policy.Swallow
+	end
+
+	if untrustedPolicy == Policy.Collect then
+		return Policy.Collect
+	end
+
+	return raiseErrorHandlerUsageError(`ErrorHandler.SetPolicy: invalid policy '{tostring(untrustedPolicy)}'`)
+end
+
+function getValidatedReporter(untrustedReporter: unknown?): Reporter?
+	if untrustedReporter == nil then
+		return nil
+	end
+
+	if typeof(untrustedReporter) ~= "function" then
+		raiseErrorHandlerUsageError("ErrorHandler.SetReporter: reporter must be a function or nil")
+	end
+
+	return untrustedReporter :: Reporter
+end
+
+function getValidatedErrorInfo(untrustedErrorInfo: unknown): ErrorInfo
+	if typeof(untrustedErrorInfo) ~= "table" then
+		raiseErrorHandlerUsageError("ErrorHandler.Report: errorInfo must be a table")
+	end
+
+	local errorInfoTable = untrustedErrorInfo :: { [string]: unknown }
+
+	return {
+		Module = getValidatedModuleName(errorInfoTable),
+		Phase = getValidatedPhaseName(errorInfoTable),
+		Name = getValidatedOptionalErrorName(errorInfoTable),
+		Message = getValidatedOptionalMessage(errorInfoTable),
+		Error = getValidatedReportedError(errorInfoTable),
+	}
+end
+
+
+function getRequiredStringFieldFromErrorInfoTable(
+	errorInfoTable: { [string]: unknown },
+	fieldName: string,
+	usageErrorMessage: string
+): string
+	local untrustedFieldValue = errorInfoTable[fieldName]
+
+	if typeof(untrustedFieldValue) == "string" then
+		return untrustedFieldValue
+	end
+
+	return raiseErrorHandlerUsageError(usageErrorMessage)
+end
+
+function getOptionalStringFieldFromErrorInfoTable(
+	errorInfoTable: { [string]: unknown },
+	fieldName: string,
+	usageErrorMessage: string
+): string?
+	local untrustedFieldValue = errorInfoTable[fieldName]
+
+	if untrustedFieldValue == nil then
+		return nil
+	end
+
+	if typeof(untrustedFieldValue) == "string" then
+		return untrustedFieldValue
+	end
+
+	return raiseErrorHandlerUsageError(usageErrorMessage)
+end
+
+function getValidatedModuleName(errorInfoTable: { [string]: unknown }): string
+	return getRequiredStringFieldFromErrorInfoTable(
+		errorInfoTable,
+		"Module",
+		"ErrorHandler.Report: Module must be a string"
+	)
+end
+
+function getValidatedPhaseName(errorInfoTable: { [string]: unknown }): string
+	return getRequiredStringFieldFromErrorInfoTable(
+		errorInfoTable,
+		"Phase",
+		"ErrorHandler.Report: Phase must be a string"
+	)
+end
+
+function getValidatedOptionalErrorName(errorInfoTable: { [string]: unknown }): string?
+	return getOptionalStringFieldFromErrorInfoTable(
+		errorInfoTable,
+		"Name",
+		"ErrorHandler.Report: Name must be a string or nil"
+	)
+end
+
+function getValidatedOptionalMessage(errorInfoTable: { [string]: unknown }): string?
+	return getOptionalStringFieldFromErrorInfoTable(
+		errorInfoTable,
+		"Message",
+		"ErrorHandler.Report: Message must be a string or nil"
+	)
+end
+
+function getValidatedReportedError(errorInfoTable: { [string]: unknown }): ReportedError
+	local reportedError = errorInfoTable.Error
+
+	if reportedError == nil then
+		raiseErrorHandlerUsageError("ErrorHandler.Report: Error must be a captured error value or ErrorHandler.NoError")
+	end
+
+	return reportedError
+end
+
+
+function createErrorInfoSnapshot(errorInfo: ErrorInfo): ErrorInfo
+	return {
+		Module = errorInfo.Module,
+		Phase = errorInfo.Phase,
+		Name = errorInfo.Name,
+		Message = errorInfo.Message,
+		Error = errorInfo.Error,
+	}
+end
+
+function createReadableErrorLocation(errorInfo: ErrorInfo): string
+	if errorInfo.Name == nil then
+		return `{errorInfo.Module}.{errorInfo.Phase}`
+	end
+
+	return `{errorInfo.Module}.{errorInfo.Phase}[{errorInfo.Name}]`
+end
+
+function createReadableErrorReason(errorInfo: ErrorInfo): string
+	if errorInfo.Message ~= nil then
+		return errorInfo.Message
+	end
+
+	if errorInfo.Error == NoErrorSentinel then
+		return "No captured error value"
+	end
+
+	return tostring(errorInfo.Error)
+end
+
+function createReadableErrorMessage(errorInfo: ErrorInfo): string
+	return `{createReadableErrorLocation(errorInfo)}: {createReadableErrorReason(errorInfo)}`
+end
+
+
+function reporterCallSucceeded(reporter: Reporter, errorInfo: ErrorInfo): (boolean, unknown?)
+	local reporterSucceeded, reporterError = pcall(function()
+		reporter(errorInfo)
+	end)
+	
+	return reporterSucceeded, reporterError
+end
+
+function callActiveReporterWithoutAllowingRecursiveReporterFailures(errorInfo: ErrorInfo): ()
+	local reporter = activeReporter
+
+	if reporter == nil then
+		return
+	end
+
+	if reporterIsCurrentlyHandlingAnError then
+		return
+	end
+
+	reporterIsCurrentlyHandlingAnError = true
+	
+	local reporterSucceeded, reporterError =
+		reporterCallSucceeded(reporter, createErrorInfoSnapshot(errorInfo))
+	
+	reporterIsCurrentlyHandlingAnError = false
+
+	if not reporterSucceeded then
+		warn(`ErrorHandler: reporter failed: {tostring(reporterError)}`)
+	end
+end
+
+function applyActivePolicyToErrorInfo(errorInfo: ErrorInfo): ()
+	if activePolicy == Policy.Throw then
+		raiseReportedErrorUsingBestAvailableCallerLocation(errorInfo)
+	end
+
+	if activePolicy == Policy.Warn then
+		warn(createReadableErrorMessage(errorInfo))
+		return
+	end
+
+	if activePolicy == Policy.Collect then
+		table.insert(collectedErrorInfoList, createErrorInfoSnapshot(errorInfo))
+		return
+	end
+
+	if activePolicy == Policy.Swallow then
+		return
+	end
+end
+
+function raiseReportedErrorUsingBestAvailableCallerLocation(errorInfo: ErrorInfo): never
+	error(createReadableErrorMessage(errorInfo), getErrorLevelForFirstCallerOutsideErrorHandlerModule())
+end
+
+
+return table.freeze(ErrorHandler)
 

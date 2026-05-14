@@ -3,164 +3,239 @@
 local Connection = require(script.Parent.Connection)
 local ErrorHandler = require(script.Parent.ErrorHandler)
 
-local Scheduler = {}
+
+export type ScheduledCallback = () -> ()
+export type StepCallback = (deltaTimeSeconds: number) -> ()
+export type ScheduledHandle = unknown
 
 export type Driver = {
-	Defer: ((() -> ()) -> any)?,
-	Delay: ((number, () -> ()) -> any)?,
-	Cancel: ((any) -> ())?,
+	Defer: ((callback: ScheduledCallback) -> ScheduledHandle?)?,
+	Delay: ((delaySeconds: number, callback: ScheduledCallback) -> ScheduledHandle?)?,
+	Cancel: ((scheduledHandle: ScheduledHandle?) -> ())?,
 	Now: (() -> number)?,
-	OnStep: (((number) -> ()) -> Connection.Connection)?,
+	OnStep: ((callback: StepCallback) -> Connection.Connection)?,
 }
+
+export type SchedulerModule = {
+	Defer: (callback: ScheduledCallback) -> ScheduledHandle?,
+	Delay: (delaySeconds: number, callback: ScheduledCallback) -> ScheduledHandle?,
+	Cancel: (scheduledHandle: ScheduledHandle?) -> (),
+	Now: () -> number,
+	OnStep: (callback: StepCallback) -> Connection.Connection,
+
+	SetDriver: (driver: Driver) -> (),
+	ResetDriver: () -> (),
+}
+
+local Scheduler = {} :: SchedulerModule
+
 
 type ActiveDriver = {
-	Defer: ((() -> ()) -> any),
-	Delay: ((number, () -> ()) -> any),
-	Cancel: ((any) -> ()),
-	Now: (() -> number),
-	OnStep: (((number) -> ()) -> Connection.Connection)?,
+	Defer: (callback: ScheduledCallback) -> ScheduledHandle?,
+	Delay: (delaySeconds: number, callback: ScheduledCallback) -> ScheduledHandle?,
+	Cancel: (scheduledHandle: ScheduledHandle?) -> (),
+	Now: () -> number,
+	OnStep: ((callback: StepCallback) -> Connection.Connection)?,
 }
 
--- Roblox primitives captured once at module load so they cannot be swapped out
--- by later global mutations.
-local _taskDefer = task.defer
-local _taskDelay = task.delay
-local _taskCancel = task.cancel
-local _time = time
-
-local _defaultOnStep: (((number) -> ()) -> Connection.Connection)? = nil
-do
-	local ok, rs = pcall(function(): any
-		return game:GetService("RunService")
-	end)
-	if ok and rs ~= nil then
-		_defaultOnStep = function(fn: (number) -> ()): Connection.Connection
-			local rbxConn = (rs :: any).Heartbeat:Connect(fn)
-			return Connection.New(function()
-				rbxConn:Disconnect()
-			end)
-		end
-	end
-end
-
-local defaultDriver: ActiveDriver = {
-	Defer = function(fn: () -> ()): any
-		return _taskDefer(fn)
-	end,
-	Delay = function(seconds: number, fn: () -> ()): any
-		return _taskDelay(seconds, fn)
-	end,
-	Cancel = function(handle: any): ()
-		if handle ~= nil then
-			_taskCancel(handle)
-		end
-	end,
-	Now = function(): number
-		return _time()
-	end,
-	OnStep = _defaultOnStep,
+type UntrustedDriverTable = {
+	[string]: unknown,
 }
 
-local activeDriver: ActiveDriver = defaultDriver
 
--- Route a callback error through ErrorHandler without wrapping the Report call
--- itself, so Report errors (Throw policy) propagate naturally from the callback.
-local function reportCallbackError(phase: string, err: unknown): ()
-	ErrorHandler.Report({
-		Module = "Scheduler",
-		Phase = phase,
-		Error = err,
-	})
+local capturedTaskDefer = task.defer
+local capturedTaskDelay = task.delay
+local capturedTaskCancel = task.cancel
+local capturedTime = time
+
+
+local defaultDriver: ActiveDriver
+local activeDriver: ActiveDriver
+
+
+function Scheduler.Defer(callback: ScheduledCallback): ScheduledHandle?
+	local validatedCallback = getValidatedScheduledCallback(callback, "Scheduler.Defer: callback must be a function")
+	local protectedCallback = createScheduledCallbackProtectedByErrorHandler(validatedCallback, "Defer")
+
+	return callActiveDeferDriver(protectedCallback)
 end
 
-function Scheduler.Defer(fn: () -> ()): any?
-	if type(fn) ~= "function" then
-		error("Scheduler.Defer: fn must be a function")
-	end
-	local wrapped: () -> () = function()
-		local ok, err = pcall(fn)
-		if not ok then
-			reportCallbackError("Defer", err)
-		end
-	end
-	return activeDriver.Defer(wrapped)
+function Scheduler.Delay(delaySeconds: number, callback: ScheduledCallback): ScheduledHandle?
+	local validatedDelaySeconds = getValidatedDelaySeconds(delaySeconds)
+	local validatedCallback = getValidatedScheduledCallback(callback, "Scheduler.Delay: callback must be a function")
+	local protectedCallback = createScheduledCallbackProtectedByErrorHandler(validatedCallback, "Delay")
+
+	return callActiveDelayDriver(validatedDelaySeconds, protectedCallback)
 end
 
-function Scheduler.Delay(seconds: number, fn: () -> ()): any?
-	if type(seconds) ~= "number" or not (seconds >= 0) then
-		error("Scheduler.Delay: seconds must be non-negative")
-	end
-	if type(fn) ~= "function" then
-		error("Scheduler.Delay: fn must be a function")
-	end
-	local wrapped: () -> () = function()
-		local ok, err = pcall(fn)
-		if not ok then
-			reportCallbackError("Delay", err)
-		end
-	end
-	return activeDriver.Delay(seconds, wrapped)
-end
-
-function Scheduler.Cancel(handle: any?): ()
-	if handle == nil then
+function Scheduler.Cancel(scheduledHandle: ScheduledHandle?): ()
+	if scheduledHandle == nil then
 		return
 	end
-	local ok, err = pcall(activeDriver.Cancel, handle)
-	if not ok then
-		reportCallbackError("Cancel", err)
-	end
+
+	callActiveCancelDriver(scheduledHandle)
 end
 
 function Scheduler.Now(): number
-	local ok, result = pcall(activeDriver.Now)
-	if not ok then
-		-- Route error; if policy is Throw, Report throws and propagates from Now().
-		reportCallbackError("Now", result)
-		-- Reached only under non-Throw policy; return a safe fallback.
-		return 0
-	end
-	if type(result) ~= "number" then
-		error("Scheduler.Now: driver returned non-number")
-	end
-	return result :: number
+	return callActiveNowDriverOrReturnFallbackTime()
 end
 
-function Scheduler.OnStep(fn: (dt: number) -> ()): Connection.Connection
-	if type(fn) ~= "function" then
-		error("Scheduler.OnStep: fn must be a function")
-	end
-	local onStepFn = activeDriver.OnStep
-	if onStepFn == nil then
-		error("Scheduler.OnStep: no step driver available")
-	end
-	local wrapped: (number) -> () = function(dt: number)
-		local ok, err = pcall(fn, dt)
-		if not ok then
-			reportCallbackError("OnStep", err)
-		end
-	end
-	local conn = onStepFn(wrapped)
-	if not Connection.IsConnection(conn) then
-		error("Scheduler.OnStep: driver must return Connection")
-	end
-	return conn
+function Scheduler.OnStep(callback: StepCallback): Connection.Connection
+	local validatedCallback = getValidatedStepCallback(callback)
+	local protectedCallback = createStepCallbackProtectedByErrorHandler(validatedCallback)
+
+	return callActiveStepDriver(protectedCallback)
 end
 
 function Scheduler.SetDriver(driver: Driver): ()
-	local raw = driver :: { [string]: unknown }
-	if type(raw) ~= "table" then
-		error("Scheduler.SetDriver: driver must be a table")
+	local validatedDriver = getValidatedDriverTable(driver)
+
+	activeDriver = createActiveDriverFromPartialDriver(validatedDriver)
+end
+
+function Scheduler.ResetDriver(): ()
+	activeDriver = defaultDriver
+end
+
+
+function createDefaultDriver(): ActiveDriver
+	return {
+		Defer = function(callback: ScheduledCallback): ScheduledHandle?
+			return capturedTaskDefer(callback)
+		end,
+
+		Delay = function(delaySeconds: number, callback: ScheduledCallback): ScheduledHandle?
+			return capturedTaskDelay(delaySeconds, callback)
+		end,
+
+		Cancel = function(scheduledHandle: ScheduledHandle?): ()
+			if scheduledHandle ~= nil then
+				capturedTaskCancel(scheduledHandle :: thread)
+			end
+		end,
+
+		Now = function(): number
+			return capturedTime()
+		end,
+
+		OnStep = createDefaultStepDriverIfRunServiceIsAvailable(),
+	}
+end
+
+function createDefaultStepDriverIfRunServiceIsAvailable(): ((callback: StepCallback) -> Connection.Connection)?
+	local runServiceWasAvailable, runService = pcall(function(): any
+		return game:GetService("RunService")
+	end)
+
+	if not runServiceWasAvailable then
+		return nil
 	end
-	local fields = { "Defer", "Delay", "Cancel", "Now", "OnStep" }
-	for _, field in fields do
-		local value = raw[field]
-		if value ~= nil and type(value) ~= "function" then
-			error(`Scheduler.SetDriver: {field} must be a function or nil`)
-		end
+
+	if runService == nil then
+		return nil
 	end
-	-- Build new active driver, keeping defaults for any omitted fields.
-	activeDriver = {
+
+	return function(callback: StepCallback): Connection.Connection
+		return connectStepCallbackToRunServiceHeartbeat(runService, callback)
+	end
+end
+
+function connectStepCallbackToRunServiceHeartbeat(runService: any, callback: StepCallback): Connection.Connection
+	local heartbeatConnection = runService.Heartbeat:Connect(callback)
+
+	return Connection.New(function()
+		heartbeatConnection:Disconnect()
+	end)
+end
+
+
+function createScheduledCallbackProtectedByErrorHandler(
+	callback: ScheduledCallback,
+	phaseName: string
+): ScheduledCallback
+	return function()
+		ErrorHandler.Protect(callback, "Scheduler", phaseName)
+	end
+end
+
+function createStepCallbackProtectedByErrorHandler(callback: StepCallback): StepCallback
+	return function(deltaTimeSeconds: number)
+		ErrorHandler.Protect(function()
+			callback(deltaTimeSeconds)
+		end, "Scheduler", "OnStep")
+	end
+end
+
+
+function callActiveDeferDriver(callback: ScheduledCallback): ScheduledHandle?
+	local driverSucceeded, scheduledHandle = ErrorHandler.Protect(function()
+		return activeDriver.Defer(callback)
+	end, "Scheduler", "DeferDriver")
+
+	if not driverSucceeded then
+		return nil
+	end
+
+	return scheduledHandle
+end
+
+function callActiveDelayDriver(delaySeconds: number, callback: ScheduledCallback): ScheduledHandle?
+	local driverSucceeded, scheduledHandle = ErrorHandler.Protect(function()
+		return activeDriver.Delay(delaySeconds, callback)
+	end, "Scheduler", "DelayDriver")
+
+	if not driverSucceeded then
+		return nil
+	end
+
+	return scheduledHandle
+end
+
+function callActiveCancelDriver(scheduledHandle: ScheduledHandle?): ()
+	ErrorHandler.Protect(function()
+		activeDriver.Cancel(scheduledHandle)
+	end, "Scheduler", "CancelDriver")
+end
+
+function callActiveNowDriverOrReturnFallbackTime(): number
+	local driverSucceeded, currentTimeSeconds = ErrorHandler.Protect(activeDriver.Now, "Scheduler", "NowDriver")
+
+	if not driverSucceeded then
+		return 0
+	end
+
+	if typeof(currentTimeSeconds) == "number" then
+		return currentTimeSeconds
+	end
+
+	return raiseSchedulerUsageError("Scheduler.Now: driver returned non-number")
+end
+
+function callActiveStepDriver(callback: StepCallback): Connection.Connection
+	local stepDriver = activeDriver.OnStep
+
+	if stepDriver == nil then
+		return raiseSchedulerUsageError("Scheduler.OnStep: no step driver available")
+	end
+
+	local driverSucceeded, connection = ErrorHandler.Protect(function()
+		return stepDriver(callback)
+	end, "Scheduler", "OnStepDriver")
+
+	if not driverSucceeded then
+		raiseSchedulerUsageError("Scheduler.OnStep: step driver failed before returning a Connection")
+	end
+
+	if Connection.IsConnection(connection) then
+		return connection :: Connection.Connection
+	end
+
+	return raiseSchedulerUsageError("Scheduler.OnStep: driver must return Connection")
+end
+
+
+function createActiveDriverFromPartialDriver(driver: Driver): ActiveDriver
+	return {
 		Defer = if driver.Defer ~= nil then driver.Defer else defaultDriver.Defer,
 		Delay = if driver.Delay ~= nil then driver.Delay else defaultDriver.Delay,
 		Cancel = if driver.Cancel ~= nil then driver.Cancel else defaultDriver.Cancel,
@@ -169,9 +244,72 @@ function Scheduler.SetDriver(driver: Driver): ()
 	}
 end
 
-function Scheduler.ResetDriver(): ()
-	activeDriver = defaultDriver
+function getValidatedDriverTable(untrustedDriver: unknown): Driver
+	if typeof(untrustedDriver) ~= "table" then
+		raiseSchedulerUsageError("Scheduler.SetDriver: driver must be a table")
+	end
+
+	local driverTable = untrustedDriver :: UntrustedDriverTable
+
+	assertDriverFieldIsFunctionOrNil(driverTable, "Defer")
+	assertDriverFieldIsFunctionOrNil(driverTable, "Delay")
+	assertDriverFieldIsFunctionOrNil(driverTable, "Cancel")
+	assertDriverFieldIsFunctionOrNil(driverTable, "Now")
+	assertDriverFieldIsFunctionOrNil(driverTable, "OnStep")
+
+	return untrustedDriver :: Driver
 end
 
-return Scheduler
+function assertDriverFieldIsFunctionOrNil(driverTable: UntrustedDriverTable, fieldName: string): ()
+	local untrustedFieldValue = driverTable[fieldName]
+
+	if untrustedFieldValue == nil then
+		return
+	end
+
+	if typeof(untrustedFieldValue) == "function" then
+		return
+	end
+
+	raiseSchedulerUsageError(`Scheduler.SetDriver: {fieldName} must be a function or nil`)
+end
+
+
+function getValidatedScheduledCallback(
+	untrustedCallback: unknown,
+	usageErrorMessage: string
+): ScheduledCallback
+	if typeof(untrustedCallback) == "function" then
+		return untrustedCallback :: ScheduledCallback
+	end
+
+	return raiseSchedulerUsageError(usageErrorMessage)
+end
+
+function getValidatedStepCallback(untrustedCallback: unknown): StepCallback
+	if typeof(untrustedCallback) == "function" then
+		return untrustedCallback :: StepCallback
+	end
+
+	return raiseSchedulerUsageError("Scheduler.OnStep: callback must be a function")
+end
+
+function getValidatedDelaySeconds(untrustedDelaySeconds: unknown): number
+	if typeof(untrustedDelaySeconds) == "number" and untrustedDelaySeconds >= 0 then
+		return untrustedDelaySeconds
+	end
+
+	return raiseSchedulerUsageError("Scheduler.Delay: delaySeconds must be a non-negative number")
+end
+
+function raiseSchedulerUsageError(message: string): never
+	error(message, 3)
+end
+
+
+defaultDriver = createDefaultDriver()
+activeDriver = defaultDriver
+
+
+return table.freeze(Scheduler)
 
