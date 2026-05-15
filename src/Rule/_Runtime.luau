@@ -1,11 +1,21 @@
 --!strict
-local Connection = require(script.Parent.Connection)
-local Context = require(script.Parent.Context)
-local ErrorHandler = require(script.Parent.ErrorHandler)
-local Scheduler = require(script.Parent.Scheduler)
-local Signal = require(script.Parent.Signal)
-local Store = require(script.Parent.Store)
-local Task = require(script.Parent.Task)
+
+-- Rule runtime owns the cohesive lifecycle state machine:
+-- enable/disable reference counts, event admission, concurrency, queued payloads,
+-- in-flight task tracking, disposers, timers, metrics, tracing, and effect execution.
+--
+-- The parent Rule module is intentionally a public facade. This private runtime module
+-- stays cohesive because these behaviors share one mutable record model.
+
+local Connection = require(script.Parent.Parent.Connection)
+local Context = require(script.Parent.Parent.Context)
+local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
+local Scheduler = require(script.Parent.Parent.Scheduler)
+local Signal = require(script.Parent.Parent.Signal)
+local Store = require(script.Parent.Parent.Store)
+local Task = require(script.Parent.Parent.Task)
+
+local Policy = require(script.Parent._Policy)
 
 -- ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -180,156 +190,6 @@ local ruleMeta = {
 		error("Rule: '" .. k .. "' is read-only", 2)
 	end,
 }
-
--- ── Default policy ────────────────────────────────────────────────────────────
-
-local KNOWN_POLICY_KEYS: { [string]: boolean } = {
-	Concurrency = true, Capacity = true, Overflow = true,
-	Cooldown = true, Debounce = true, Throttle = true,
-	Leading = true, Trailing = true, Schedule = true,
-	RecheckGuardBeforeRun = true, CancelTasksWhenGuardFalse = true,
-	Once = true, ErrorPolicy = true, Retry = true, Trace = true, Tag = true,
-}
-
-local function makeDefaultPolicy(): PolicyRecord
-	return {
-		Concurrency = "Exhaust",
-		Capacity = math.huge,
-		Overflow = "Drop",
-		Cooldown = nil,
-		Debounce = nil,
-		Throttle = nil,
-		Leading = true,
-		Trailing = true,
-		Schedule = "Deferred",
-		RecheckGuardBeforeRun = false,
-		CancelTasksWhenGuardFalse = false,
-		Once = false,
-		ErrorPolicy = nil,
-		Retry = nil,
-		Trace = false,
-		Tag = nil,
-	}
-end
-
--- ── Policy validation ─────────────────────────────────────────────────────────
-
-local function validatePolicy(policy: PartialPolicy): (boolean, string?)
-	if type(policy) ~= "table" then
-		return false, "policy must be a table"
-	end
-	for k in policy do
-		if not KNOWN_POLICY_KEYS[k :: any] then
-			return false, "unknown policy key: " .. tostring(k)
-		end
-	end
-	local concurrency = policy.Concurrency
-	if concurrency ~= nil then
-		if concurrency ~= "Exhaust" and concurrency ~= "Merge"
-			and concurrency ~= "Concat" and concurrency ~= "Switch" then
-			return false, "Concurrency must be 'Exhaust', 'Merge', 'Concat', or 'Switch'"
-		end
-	end
-	local capacity = policy.Capacity
-	if capacity ~= nil then
-		if type(capacity) ~= "number" or (capacity <= 0 and capacity ~= math.huge) then
-			return false, "Capacity must be a positive number"
-		end
-	end
-	local overflow = policy.Overflow
-	if overflow ~= nil then
-		if overflow ~= "Drop" and overflow ~= "Latest" and overflow ~= "Fifo" then
-			return false, "Overflow must be 'Drop', 'Latest', or 'Fifo'"
-		end
-	end
-	local effectiveConcurrency = if concurrency ~= nil then concurrency else "Exhaust"
-	local effectiveOverflow = if overflow ~= nil then overflow else "Drop"
-	if effectiveConcurrency == "Merge" and effectiveOverflow ~= "Drop" then
-		return false, "Merge concurrency only supports Overflow 'Drop'"
-	end
-	local cooldown = policy.Cooldown
-	if cooldown ~= nil then
-		if type(cooldown) ~= "number" or cooldown < 0 then
-			return false, "Cooldown must be >= 0"
-		end
-	end
-	local debounce = policy.Debounce
-	if debounce ~= nil then
-		if type(debounce) ~= "number" or debounce < 0 then
-			return false, "Debounce must be >= 0"
-		end
-	end
-	local throttle = policy.Throttle
-	if throttle ~= nil then
-		if type(throttle) ~= "number" or throttle <= 0 then
-			return false, "Throttle must be > 0"
-		end
-	end
-	local leading = policy.Leading
-	if leading ~= nil and type(leading) ~= "boolean" then
-		return false, "Leading must be a boolean"
-	end
-	local trailing = policy.Trailing
-	if trailing ~= nil and type(trailing) ~= "boolean" then
-		return false, "Trailing must be a boolean"
-	end
-	local schedule = policy.Schedule
-	if schedule ~= nil then
-		if schedule ~= "Immediate" and schedule ~= "Deferred" then
-			return false, "Schedule must be 'Immediate' or 'Deferred'"
-		end
-	end
-	local recheckGuard = policy.RecheckGuardBeforeRun
-	if recheckGuard ~= nil and type(recheckGuard) ~= "boolean" then
-		return false, "RecheckGuardBeforeRun must be a boolean"
-	end
-	local cancelGuard = policy.CancelTasksWhenGuardFalse
-	if cancelGuard ~= nil and type(cancelGuard) ~= "boolean" then
-		return false, "CancelTasksWhenGuardFalse must be a boolean"
-	end
-	local once = policy.Once
-	if once ~= nil and type(once) ~= "boolean" then
-		return false, "Once must be a boolean"
-	end
-	local errorPolicy = policy.ErrorPolicy
-	if errorPolicy ~= nil then
-		if errorPolicy ~= "Throw" and errorPolicy ~= "Warn"
-			and errorPolicy ~= "Swallow" and errorPolicy ~= "Collect" then
-			return false, "ErrorPolicy must be 'Throw', 'Warn', 'Swallow', or 'Collect'"
-		end
-	end
-	local retry = policy.Retry
-	if retry ~= nil then
-		if type(retry) ~= "table" then
-			return false, "Retry must be a table"
-		end
-		local retryCount = retry.Count
-		if type(retryCount) ~= "number" or retryCount < 1 or math.floor(retryCount) ~= retryCount then
-			return false, "Retry.Count must be a positive integer"
-		end
-		local retryBackoff = retry.Backoff
-		if retryBackoff ~= "Fixed" and retryBackoff ~= "Expo" then
-			return false, "Retry.Backoff must be 'Fixed' or 'Expo'"
-		end
-		local retryBase = retry.Base
-		if type(retryBase) ~= "number" or retryBase < 0 then
-			return false, "Retry.Base must be >= 0"
-		end
-		local retryJitter = retry.Jitter
-		if retryJitter ~= nil and (type(retryJitter) ~= "number" or retryJitter < 0) then
-			return false, "Retry.Jitter must be >= 0"
-		end
-	end
-	local trace = policy.Trace
-	if trace ~= nil and type(trace) ~= "boolean" then
-		return false, "Trace must be a boolean"
-	end
-	local tag = policy.Tag
-	if tag ~= nil and type(tag) ~= "string" then
-		return false, "Tag must be a string"
-	end
-	return true, nil
-end
 
 -- ── Effect error handler ──────────────────────────────────────────────────────
 
@@ -727,7 +587,7 @@ function Rule.New<Ctx, Payload>(name: string): Rule<Ctx, Payload>
 		WithCtxHandle = nil,
 		EnableCtxHandle = nil,
 		AttachScope = nil,
-		Policy = makeDefaultPolicy(),
+		Policy = Policy.createDefaultPolicy(),
 		SignalConn = nil,
 		GuardWatchConn = nil,
 		DebounceTimerHandle = nil,
@@ -746,7 +606,7 @@ function Rule.New<Ctx, Payload>(name: string): Rule<Ctx, Payload>
 		Errors = 0,
 		TotalMs = 0,
 		CollectedErrors = {},
-	}
+	} :: any
 	local handle = setmetatable({}, ruleMeta)
 	ruleRecords[handle] = rec
 	return handle :: any
@@ -759,11 +619,11 @@ function Rule.IsRule(value: unknown): boolean
 end
 
 function Rule.DefaultPolicy(): Policy
-	return makeDefaultPolicy() :: Policy
+	return (Policy.createDefaultPolicy() :: any) :: Policy
 end
 
 function Rule.ValidatePolicy(policy: PartialPolicy): (boolean, string?)
-	return validatePolicy(policy)
+	return Policy.validatePolicy(policy :: any)
 end
 
 function Rule.SetTracer(fn: ((TraceEvent) -> ())?): ()
@@ -833,15 +693,15 @@ function ruleMethods:Policy(policy: any): any
 	if rec.EnableCount > 0 then
 		error("Rule.Policy: cannot configure while enabled", 2)
 	end
-	local ok, msg = validatePolicy(policy)
+	local ok, msg = Policy.validatePolicy(policy)
 	if not ok then
 		error("Rule.Policy: " .. (msg :: string), 2)
 	end
-	local defaults = makeDefaultPolicy()
+	local defaults = Policy.createDefaultPolicy()
 	for k, v in policy do
 		(defaults :: any)[k] = v
 	end
-	rec.Policy = defaults
+	rec.Policy = defaults :: any
 	return self
 end
 

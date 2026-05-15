@@ -1,410 +1,1087 @@
-# Rule
+# Rule API Reference
 
-A declarative event-driven effect runner. A `Rule` listens to a `Signal`, evaluates an optional guard, and runs an effect with configurable concurrency, throttle, debounce, retry, and error policy. Rules are typically attached to FSM modes so they enable and disable automatically with state changes.
+`Rule` is the declarative policy and effect-orchestration primitive for CoreAPI.
 
----
+Place this module at:
 
-## Enum Tables
-
-### `Rule.Concurrency`
-
-```luau
-Rule.Concurrency.Exhaust  -- (default) drop new events while effect is in-flight
-Rule.Concurrency.Merge    -- run all events concurrently up to Capacity
-Rule.Concurrency.Concat   -- queue events and run them one after another
-Rule.Concurrency.Switch   -- cancel the current run and start with the new event
+```text
+ReplicatedStorage/Shared/Kernel/Rule
 ```
 
-### `Rule.Overflow`
+A rule receives payloads, evaluates admission policy, and executes effects under deterministic concurrency and scheduling semantics.
 
-Controls what happens when the `Concat` queue is full (at `Capacity`):
+`Rule` exists to solve architectural problems involving:
 
-```luau
-Rule.Overflow.Drop    -- (default) discard the new event
-Rule.Overflow.Latest  -- replace the last queued event with the new one
-Rule.Overflow.Fifo    -- discard the oldest queued event, enqueue the new one
-```
+- effect orchestration;
+- concurrency control;
+- backpressure;
+- retries;
+- debouncing;
+- throttling;
+- task ownership;
+- lifecycle cleanup;
+- metrics;
+- tracing;
+- deterministic execution policy.
 
-### `Rule.Schedule`
+It depends on:
 
-```luau
-Rule.Schedule.Immediate  -- run effect synchronously when signal fires
-Rule.Schedule.Deferred   -- (default) defer effect via Scheduler.Defer
-```
-
----
-
-## API Reference
-
-### `Rule.New(name)`
-
-Creates a new unconfigured rule. The rule is inactive until `Enable` is called.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `name` | `string` | Non-empty identifier shown in traces and metrics |
-
-**Returns:** `Rule<any, any>`
-
-**Errors:**
-- `Rule.New: name must be a non-empty string`
-
-```luau
-local killRule = Rule.New("ScoreOnKill")
-    :On(onEnemyKilled)
-    :Run(function(ctx, payload, frame)
-        score:Set(score:Get() + (payload.Points or 10))
-    end)
+```text
+ReplicatedStorage/Shared/Kernel/Connection
+ReplicatedStorage/Shared/Kernel/ErrorHandler
+ReplicatedStorage/Shared/Kernel/Scheduler
+ReplicatedStorage/Shared/Kernel/Signal
+ReplicatedStorage/Shared/Kernel/Task
 ```
 
 ---
 
-### `Rule.IsRule(value)`
+# Design Goals
 
-Returns `true` if `value` is a live Rule handle.
+`Rule` is designed around one central idea:
 
-**Returns:** `boolean`
+> effect execution should be declarative infrastructure rather than ad-hoc callback code.
 
----
+Instead of scattering:
 
-### `Rule.DefaultPolicy()`
+- cooldown logic;
+- debounce logic;
+- retry logic;
+- cancellation logic;
+- queue logic;
+- overflow logic;
+- cleanup logic;
+- tracing;
+- metrics;
 
-Returns a copy of the default policy table.
-
-**Returns:** `Policy`
-
----
-
-### `Rule.ValidatePolicy(policy)`
-
-Validates a partial policy table without applying it.
-
-**Returns:** `(boolean, string?)` — `(true, nil)` on success; `(false, message)` on invalid input
+throughout gameplay systems, a rule centralizes those behaviors into one deterministic policy object.
 
 ---
 
-### `Rule.SetTracer(fn?)`
+# Core Mental Model
 
-Installs a global tracer called on every rule lifecycle event. Pass `nil` to remove.
+A rule behaves like:
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `fn` | `((TraceEvent) -> ())?` | Receives a `TraceEvent` |
+```text
+payload
+    ↓
+admission policy
+    ↓
+scheduling policy
+    ↓
+concurrency policy
+    ↓
+effect execution
+    ↓
+cleanup / tracing / metrics
+```
 
-**`TraceEvent` fields:**
+Rules do not merely “run callbacks.”
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `Event` | `string` | One of `Rule.Enable`, `Rule.Disable`, `Rule.Admit`, `Rule.Skip`, `Rule.Start`, `Rule.Done`, `Rule.Error`, `Rule.Cancel`, `Rule.Once`, `Rule.Destroy` |
-| `RuleName` | `string` | The rule's name |
-| `Tag` | `string?` | The policy `Tag`, if set |
+They own:
 
----
-
-### Builder Methods (configure before enabling)
-
-All builder methods return `self` for chaining. Calling any builder method while the rule is enabled throws.
-
----
-
-#### `handle:On(signal)`
-
-Binds the signal that triggers this rule.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `signal` | `Signal.Signal<Payload>` | Must be a live Signal |
-
-**Errors:**
-- `Rule.On: rule is destroyed`
-- `Rule.On: cannot configure while enabled`
-- `Rule.On: signal must be a live Signal`
+- execution semantics;
+- lifecycle;
+- concurrency;
+- retries;
+- cancellation;
+- queueing;
+- tracing;
+- cleanup.
 
 ---
 
-#### `handle:When(guard)`
-
-Sets an optional guard. The effect only runs when the guard passes.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `guard` | `Store.ReadableStore<boolean> \| (ctx, payload, frame) -> boolean` | Store or predicate function |
-
-**Errors:**
-- `Rule.When: rule is destroyed`
-- `Rule.When: cannot configure while enabled`
-- `Rule.When: guard must be a Store or function`
+# Importing
 
 ```luau
--- Store guard: effect runs only while isAlive is true.
-rule:When(isAlive)
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
--- Function guard: custom predicate.
-rule:When(function(ctx, payload, frame)
-    return payload.Points > 0
+local Rule = require(ReplicatedStorage.Shared.Kernel.Rule)
+```
+
+---
+
+# Relationship to Other Kernel Modules
+
+## Relationship to `Task`
+
+Rules internally manage asynchronous execution through `Task`.
+
+Effects may:
+
+- return plain values;
+- return `Task.Task`;
+- yield;
+- be retried;
+- be cancelled;
+- be grouped.
+
+Rules own the lifecycle of internally created tasks.
+
+---
+
+## Relationship to `Scheduler`
+
+Scheduling semantics route through `Scheduler`.
+
+This includes:
+
+- deferred execution;
+- delays;
+- cooldown windows;
+- throttling;
+- retry delays;
+- queue flushing.
+
+---
+
+## Relationship to `ErrorHandler`
+
+Effect failures are runtime failures.
+
+They route through `ErrorHandler`.
+
+This ensures:
+
+- global policy consistency;
+- centralized reporting;
+- deterministic runtime semantics.
+
+Usage errors still raise immediately.
+
+---
+
+## Relationship to `Signal`
+
+Rules expose reactive lifecycle signals such as:
+
+- started;
+- succeeded;
+- failed;
+- cancelled;
+- overflowed;
+- retried.
+
+These integrate naturally with the rest of the reactive Kernel architecture.
+
+---
+
+# Exported Types
+
+# `Rule.Rule<ContextValue, Payload>`
+
+```luau
+type Rule<ContextValue, Payload> = opaque
+```
+
+The primary rule handle.
+
+A rule owns:
+
+- configuration;
+- lifecycle;
+- metrics;
+- active tasks;
+- queued payloads;
+- retry state;
+- effect execution.
+
+---
+
+# `Rule.Policy`
+
+```luau
+type Policy = {
+    Enabled: boolean,
+    Concurrency: Rule.Concurrency,
+    Overflow: Rule.Overflow,
+    Schedule: Rule.Schedule,
+    Cooldown: number,
+    MaxConcurrent: number,
+    MaxQueue: number,
+    RetryCount: number,
+    RetryDelay: number,
+}
+```
+
+Defines execution behavior.
+
+Policies are immutable snapshots internally.
+
+---
+
+# `Rule.PartialPolicy`
+
+```luau
+type PartialPolicy = {
+    Enabled: boolean?,
+    Concurrency: Rule.Concurrency?,
+    Overflow: Rule.Overflow?,
+    Schedule: Rule.Schedule?,
+    Cooldown: number?,
+    MaxConcurrent: number?,
+    MaxQueue: number?,
+    RetryCount: number?,
+    RetryDelay: number?,
+}
+```
+
+Used for partial updates.
+
+---
+
+# `Rule.Concurrency`
+
+```luau
+Rule.Concurrency.Serial
+Rule.Concurrency.Parallel
+Rule.Concurrency.Restart
+Rule.Concurrency.Drop
+```
+
+Controls concurrent execution semantics.
+
+---
+
+# `Rule.Overflow`
+
+```luau
+Rule.Overflow.DropNewest
+Rule.Overflow.DropOldest
+Rule.Overflow.Reject
+```
+
+Controls queue overflow behavior.
+
+---
+
+# `Rule.Schedule`
+
+```luau
+Rule.Schedule.Immediate
+Rule.Schedule.Deferred
+Rule.Schedule.Delayed
+```
+
+Controls scheduling semantics.
+
+---
+
+# `Rule.RetryOptions`
+
+```luau
+type RetryOptions = {
+    Count: number,
+    Delay: number,
+}
+```
+
+Retry configuration.
+
+---
+
+# `Rule.RuleFrame`
+
+```luau
+type RuleFrame = {
+    Payload: any,
+    Attempt: number,
+    StartedAt: number,
+}
+```
+
+Represents one active execution frame.
+
+---
+
+# `Rule.Metrics`
+
+```luau
+type Metrics = {
+    Started: number,
+    Succeeded: number,
+    Failed: number,
+    Cancelled: number,
+    Retried: number,
+    Overflowed: number,
+}
+```
+
+Runtime metrics snapshot.
+
+---
+
+# `Rule.TraceEvent`
+
+```luau
+type TraceEvent = {
+    Rule: string,
+    Event: string,
+    Payload: any,
+    Time: number,
+}
+```
+
+Tracing payload emitted to the active tracer.
+
+---
+
+# Public Constants
+
+# `Rule.Concurrency`
+
+Controls concurrent execution.
+
+| Value | Meaning |
+|---|---|
+| `Serial` | Execute one payload at a time in arrival order. |
+| `Parallel` | Allow many concurrent executions. |
+| `Restart` | Cancel existing execution when a new payload arrives. |
+| `Drop` | Ignore new payloads while execution is active. |
+
+---
+
+# `Rule.Overflow`
+
+Controls queue overflow handling.
+
+| Value | Meaning |
+|---|---|
+| `DropNewest` | Reject newest queued payload. |
+| `DropOldest` | Remove oldest queued payload. |
+| `Reject` | Reject enqueue entirely. |
+
+---
+
+# `Rule.Schedule`
+
+Controls when effects execute.
+
+| Value | Meaning |
+|---|---|
+| `Immediate` | Execute synchronously in current turn. |
+| `Deferred` | Execute through `Scheduler.Defer`. |
+| `Delayed` | Execute after configured delay. |
+
+---
+
+# Constructors
+
+# `Rule.New`
+
+```luau
+Rule.New(
+    name: string
+): Rule.Rule<any, any>
+```
+
+Creates a new rule.
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|---|---:|---:|---|
+| `name` | `string` | Yes | Human-readable rule name. |
+
+## Returns
+
+| Type | Description |
+|---|---|
+| `Rule.Rule<any, any>` | New rule handle. |
+
+## Possible Usage Errors
+
+```text
+Rule.New: name must be a non-empty string
+```
+
+## Example
+
+```luau
+local attackRule = Rule.New("Attack")
+```
+
+---
+
+# `Rule.IsRule`
+
+```luau
+Rule.IsRule(value: unknown): boolean
+```
+
+Returns whether a value is a live rule handle.
+
+---
+
+# `Rule.DefaultPolicy`
+
+```luau
+Rule.DefaultPolicy(): Rule.Policy
+```
+
+Returns a fresh default policy snapshot.
+
+## Default Values
+
+```luau
+{
+    Enabled = true,
+    Concurrency = Rule.Concurrency.Serial,
+    Overflow = Rule.Overflow.Reject,
+    Schedule = Rule.Schedule.Immediate,
+    Cooldown = 0,
+    MaxConcurrent = 1,
+    MaxQueue = 0,
+    RetryCount = 0,
+    RetryDelay = 0,
+}
+```
+
+---
+
+# `Rule.ValidatePolicy`
+
+```luau
+Rule.ValidatePolicy(
+    policy: Rule.PartialPolicy
+): (boolean, string?)
+```
+
+Validates policy structure without mutating a rule.
+
+Returns:
+
+```luau
+(valid, message)
+```
+
+---
+
+# `Rule.SetTracer`
+
+```luau
+Rule.SetTracer(
+    tracer: ((Rule.TraceEvent) -> ())?
+): ()
+```
+
+Sets the global tracing callback.
+
+Passing `nil` disables tracing.
+
+## Runtime Error Behavior
+
+Tracer failures route through `ErrorHandler`.
+
+---
+
+# Rule Configuration APIs
+
+# `rule:SetPolicy`
+
+```luau
+rule:SetPolicy(
+    policy: Rule.PartialPolicy
+): ()
+```
+
+Applies policy updates.
+
+## Example
+
+```luau
+rule:SetPolicy({
+    Concurrency = Rule.Concurrency.Parallel,
+    MaxConcurrent = 4,
+})
+```
+
+---
+
+# `rule:GetPolicy`
+
+```luau
+rule:GetPolicy(): Rule.Policy
+```
+
+Returns a cloned immutable policy snapshot.
+
+---
+
+# `rule:Enable`
+
+```luau
+rule:Enable(): ()
+```
+
+Enables the rule.
+
+---
+
+# `rule:Disable`
+
+```luau
+rule:Disable(): ()
+```
+
+Disables the rule.
+
+Disabled rules reject new payloads.
+
+Active tasks continue unless explicitly cancelled.
+
+---
+
+# `rule:IsEnabled`
+
+```luau
+rule:IsEnabled(): boolean
+```
+
+Returns whether the rule accepts new payloads.
+
+---
+
+# Effect APIs
+
+# `rule:Use`
+
+```luau
+rule:Use(
+    effect: (context: ContextValue, payload: Payload) -> any
+): ()
+```
+
+Registers the effect callback.
+
+## Behavior
+
+Only one effect may be active at a time.
+
+Replacing the effect overwrites the previous callback.
+
+## Runtime Error Behavior
+
+Effect failures route through `ErrorHandler`.
+
+---
+
+# `rule:Dispatch`
+
+```luau
+rule:Dispatch(
+    context: ContextValue,
+    payload: Payload
+): ()
+```
+
+Submits payload execution.
+
+Admission behavior depends on:
+
+- enabled state;
+- concurrency policy;
+- queue state;
+- cooldown state;
+- overflow policy.
+
+---
+
+# `rule:DispatchDeferred`
+
+```luau
+rule:DispatchDeferred(
+    context: ContextValue,
+    payload: Payload
+): ()
+```
+
+Equivalent to dispatching through `Scheduler.Defer`.
+
+---
+
+# `rule:DispatchDelayed`
+
+```luau
+rule:DispatchDelayed(
+    seconds: number,
+    context: ContextValue,
+    payload: Payload
+): ()
+```
+
+Schedules delayed dispatch.
+
+---
+
+# Concurrency Semantics
+
+# Serial
+
+```luau
+Concurrency = Rule.Concurrency.Serial
+```
+
+One execution at a time.
+
+Additional payloads queue.
+
+---
+
+# Parallel
+
+```luau
+Concurrency = Rule.Concurrency.Parallel
+```
+
+Many concurrent executions allowed.
+
+`MaxConcurrent` limits active executions.
+
+---
+
+# Restart
+
+```luau
+Concurrency = Rule.Concurrency.Restart
+```
+
+Existing active executions are cancelled when new payloads arrive.
+
+Useful for:
+
+- search;
+- targeting;
+- latest-state workflows.
+
+---
+
+# Drop
+
+```luau
+Concurrency = Rule.Concurrency.Drop
+```
+
+New payloads are ignored while work is active.
+
+Useful for:
+
+- buttons;
+- anti-spam interactions;
+- cooldown actions.
+
+---
+
+# Queue Behavior
+
+Rules may internally queue payloads.
+
+Queue handling depends on:
+
+- `MaxQueue`;
+- `Overflow`;
+- `Concurrency`.
+
+---
+
+# Retry Behavior
+
+Rules may retry failed effects.
+
+Retries preserve:
+
+- payload;
+- context;
+- tracing;
+- metrics.
+
+Retry delays route through `Scheduler`.
+
+---
+
+# Metrics APIs
+
+# `rule:GetMetrics`
+
+```luau
+rule:GetMetrics(): Rule.Metrics
+```
+
+Returns a cloned metrics snapshot.
+
+---
+
+# `rule:ResetMetrics`
+
+```luau
+rule:ResetMetrics(): ()
+```
+
+Resets all counters to zero.
+
+---
+
+# Lifecycle APIs
+
+# `rule:Destroy`
+
+```luau
+rule:Destroy(): ()
+```
+
+Destroys the rule.
+
+## Behavior
+
+Destroying a rule:
+
+1. disables admission;
+2. cancels active tasks;
+3. clears queues;
+4. disconnects signals;
+5. destroys internal resources.
+
+Destruction is idempotent.
+
+---
+
+# `rule:IsDestroyed`
+
+```luau
+rule:IsDestroyed(): boolean
+```
+
+Returns whether the rule has been destroyed.
+
+---
+
+# Signals
+
+Rules expose lifecycle signals.
+
+---
+
+# `rule:Started`
+
+```luau
+rule:Started(): Signal.Signal<Rule.RuleFrame>
+```
+
+Fires when execution begins.
+
+---
+
+# `rule:Succeeded`
+
+```luau
+rule:Succeeded(): Signal.Signal<Rule.RuleFrame>
+```
+
+Fires when execution succeeds.
+
+---
+
+# `rule:Failed`
+
+```luau
+rule:Failed(): Signal.Signal<Rule.RuleFrame>
+```
+
+Fires when execution fails.
+
+---
+
+# `rule:Cancelled`
+
+```luau
+rule:Cancelled(): Signal.Signal<Rule.RuleFrame>
+```
+
+Fires when execution is cancelled.
+
+---
+
+# `rule:Retried`
+
+```luau
+rule:Retried(): Signal.Signal<Rule.RuleFrame>
+```
+
+Fires when execution retries.
+
+---
+
+# `rule:Overflowed`
+
+```luau
+rule:Overflowed(): Signal.Signal<Rule.RuleFrame>
+```
+
+Fires when queue overflow occurs.
+
+---
+
+# Runtime Error Semantics
+
+This is one of the most important Rule behaviors.
+
+# Usage Errors
+
+Usage errors raise immediately.
+
+Examples:
+
+- invalid policy;
+- invalid concurrency enum;
+- invalid queue size;
+- missing effect;
+- destroyed rule usage.
+
+---
+
+# Runtime Failures
+
+Runtime failures route through `ErrorHandler`.
+
+Examples:
+
+- effect callback failures;
+- tracer failures;
+- async execution failures.
+
+This keeps Rule behavior consistent with the rest of the Kernel.
+
+---
+
+# Scheduling Semantics
+
+# Immediate
+
+Runs synchronously.
+
+---
+
+# Deferred
+
+Runs through `Scheduler.Defer`.
+
+---
+
+# Delayed
+
+Runs after delay through `Scheduler.Delay`.
+
+---
+
+# Cleanup Ownership
+
+Rules own:
+
+- active tasks;
+- retry timers;
+- queued payloads;
+- lifecycle signals;
+- internal cleanup handlers.
+
+Destroying the rule cleans all owned resources.
+
+---
+
+# Tracing
+
+Tracing is global and optional.
+
+Each trace event includes:
+
+- rule name;
+- event name;
+- payload;
+- timestamp.
+
+Trace events are observational only.
+
+Tracer failures never stop execution.
+
+---
+
+# Gotchas
+
+# Serial Does Not Mean Immediate
+
+Serial controls concurrency.
+
+Scheduling still controls timing.
+
+---
+
+# Restart Cancels Existing Work
+
+Do not use restart semantics for irreversible side effects.
+
+---
+
+# Parallel Can Grow Quickly
+
+Unbounded parallelism can create excessive tasks.
+
+Use `MaxConcurrent`.
+
+---
+
+# Retry Logic Should Be Idempotent
+
+Effects may execute multiple times under retry policy.
+
+---
+
+# Disabled Rules Do Not Cancel Existing Work
+
+Disabling only blocks future admission.
+
+---
+
+# Metrics Are Cumulative
+
+Metrics persist until reset.
+
+---
+
+# Best Practices
+
+# Prefer Declarative Policies
+
+Good:
+
+```luau
+rule:SetPolicy({
+    Concurrency = Rule.Concurrency.Drop,
+    Cooldown = 0.2,
+})
+```
+
+Avoid hand-written debounce/cooldown state machines.
+
+---
+
+# Use Restart For Latest-State Workflows
+
+Examples:
+
+- targeting;
+- search;
+- current selection;
+- active tool.
+
+---
+
+# Use Drop For Spam Prevention
+
+Examples:
+
+- buttons;
+- attack spam;
+- rapid interactions.
+
+---
+
+# Use Serial For Ordered Effects
+
+Examples:
+
+- inventory updates;
+- save queues;
+- transactional pipelines.
+
+---
+
+# Use Parallel Carefully
+
+Parallelism improves throughput but increases coordination complexity.
+
+---
+
+# Full Example: Attack Cooldown
+
+```luau
+local attackRule = Rule.New("Attack")
+
+attackRule:SetPolicy({
+    Concurrency = Rule.Concurrency.Drop,
+    Cooldown = 0.25,
+})
+
+attackRule:Use(function(player, payload)
+    dealDamage(player, payload.Target)
 end)
 ```
 
 ---
 
-#### `handle:Run(effect)`
-
-Sets the effect function.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `effect` | `(ctx, payload, frame) -> (nil \| (() -> ()) \| Task)` | Effect; return a cleanup function or a Task to track |
-
-**Errors:**
-- `Rule.Run: rule is destroyed`
-- `Rule.Run: cannot configure while enabled`
-- `Rule.Run: effect must be a function`
-
-The `frame` argument has type `RuleFrame`:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `RuleName` | `string` | Name or tag |
-| `Now` | `() -> number` | Current time |
-| `Token` | `Task.Token?` | Set when running inside a `Task.Retry` |
-
-**Effect return values:**
-- `nil` — no cleanup needed
-- `() -> ()` — called when the next event fires (replaces the previous disposer)
-- `Task.Task<any>` — tracked by the rule for concurrency accounting
-
----
-
-#### `handle:Policy(policy)`
-
-Merges `policy` into the defaults.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `policy` | `PartialPolicy` | Fields to override; see table below |
-
-**`PartialPolicy` fields:**
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `Concurrency` | `string?` | `"Exhaust"` | Use `Rule.Concurrency.*` |
-| `Capacity` | `number?` | `math.huge` | Max in-flight / queue depth |
-| `Overflow` | `string?` | `"Drop"` | Use `Rule.Overflow.*`; only for `Concat` |
-| `Cooldown` | `number?` | `nil` | Min seconds between admits |
-| `Debounce` | `number?` | `nil` | Collapse rapid fires; delay in seconds |
-| `Throttle` | `number?` | `nil` | Rate limit; window in seconds |
-| `Leading` | `boolean?` | `true` | Fire on leading edge of throttle window |
-| `Trailing` | `boolean?` | `true` | Fire on trailing edge of throttle window |
-| `Schedule` | `string?` | `"Deferred"` | Use `Rule.Schedule.*` |
-| `RecheckGuardBeforeRun` | `boolean?` | `false` | Re-evaluate guard just before running effect |
-| `CancelTasksWhenGuardFalse` | `boolean?` | `false` | Cancel in-flight tasks when a Store guard turns false |
-| `Once` | `boolean?` | `false` | Disable rule after first successful run |
-| `ErrorPolicy` | `string?` | `nil` | Per-rule policy; overrides global for effect errors |
-| `Retry` | `RetryOptions?` | `nil` | Retry configuration; see Task.Retry |
-| `Trace` | `boolean?` | `false` | Enable tracing for this rule |
-| `Tag` | `string?` | `nil` | Override name in traces |
-
-**Errors:**
-- `Rule.Policy: rule is destroyed`
-- `Rule.Policy: cannot configure while enabled`
-- `Rule.Policy: {validation message}` — see `Rule.ValidatePolicy` for all messages
-
-**Constraints:**
-- `Merge` concurrency only supports `Overflow.Drop`
-- `Concurrency` must be one of the `Rule.Concurrency.*` values
-- `Overflow` must be one of the `Rule.Overflow.*` values
-- `Schedule` must be one of the `Rule.Schedule.*` values
-- `ErrorPolicy` must be one of the four ErrorHandler policy values
-
----
-
-#### `handle:WithContext(ctx)`
-
-Provides a fixed context used as the `ctx` argument to the guard and effect. Overrides the context passed to `Enable`.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `ctx` | `Context.Context<any>` | Must be a valid Context |
-
-**Errors:**
-- `Rule.WithContext: rule is destroyed`
-- `Rule.WithContext: cannot configure while enabled`
-- `Rule.WithContext: ctx must be a Context`
-
----
-
-#### `handle:Attach(scope)`
-
-Registers this rule with an FSM or FSM Mode so it is enabled/disabled automatically with that scope. Must be called before `Start`/`Enable`.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `scope` | `FSM \| Mode` | The FSM or Mode to attach to |
-
-**Errors:**
-- `Rule.Attach: rule is destroyed`
-- `Rule.Attach: scope must be an FSM or FSM Mode`
-
----
-
-### Lifecycle Methods
-
-#### `handle:Enable(ctx?)`
-
-Enables the rule. The rule begins listening to the signal. Idempotent — calling `Enable` multiple times increments a reference count; each `Enable` must be matched with a `Disable`.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `ctx` | `Context.Context<any>?` | Context passed to the guard and effect (if `WithContext` is not set) |
-
-**Errors:**
-- `Rule.Enable: rule is destroyed`
-- `Rule.Enable: signal is not configured`
-- `Rule.Enable: effect is not configured`
-- `Rule.Enable: ctx must be Context`
-
----
-
-#### `handle:Disable()`
-
-Decrements the enable reference count. When it reaches zero:
-1. Disconnects from the signal.
-2. Cancels all in-flight tasks with `Task.Reason.ModeExit`.
-3. Runs and clears the current disposer.
-4. Cancels pending debounce and throttle timers.
-5. Clears the `Concat` queue.
-
-Idempotent at zero count.
-
----
-
-#### `handle:Destroy()`
-
-Disables the rule (if enabled) and permanently marks it destroyed. Further configuration or enable attempts throw.
-
----
-
-#### `handle:IsEnabled()`
-
-Returns `true` if the rule's enable count is greater than zero.
-
-**Returns:** `boolean`
-
----
-
-#### `handle:IsDestroyed()`
-
-Returns `true` if the rule has been destroyed.
-
-**Returns:** `boolean`
-
----
-
-#### `handle:Name()`
-
-Returns the rule's display name (the policy `Tag` if set, otherwise the name passed to `Rule.New`).
-
-**Returns:** `string`
-
----
-
-### Metrics
-
-#### `handle:Metrics()`
-
-Returns a snapshot of the rule's runtime metrics.
-
-**Returns:** `Metrics`
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `Runs` | `number` | Total effect executions |
-| `Skipped` | `number` | Events that passed guard but were dropped by concurrency/cooldown |
-| `Errors` | `number` | Effect + guard errors |
-| `AvgMs` | `number` | Average effect duration in milliseconds |
-| `CollectedErrors` | `{ unknown }` | Errors accumulated under `ErrorPolicy = "Collect"` |
-
----
-
-#### `handle:ResetMetrics()`
-
-Zeroes all metrics counters and clears `CollectedErrors`.
-
----
-
-## Policy Interactions
-
-| Mechanism | When it applies |
-|-----------|----------------|
-| **Debounce** | Applied first. Collapses rapid fires into one. |
-| **Throttle** | Applied after debounce (or instead, if no debounce). Controls leading/trailing fires. |
-| **Guard** | Checked after debounce/throttle. If false, event is skipped. |
-| **Cooldown** | Checked after guard. Skips if last admit was within cooldown period. |
-| **Concurrency** | Checked last. Determines whether the effect runs immediately or is queued/dropped. |
-
-**Effect ordering when a disposer is returned:**
-- The disposer from the _previous_ run is called just before the new effect begins (for non-task effects with Exhaust/Switch concurrency).
-
----
-
-## Gotchas
-
-- **Builder methods throw while enabled.** `On`, `When`, `Run`, `Policy`, `WithContext`, `Attach` all check `EnableCount > 0` and throw `cannot configure while enabled`.
-- **`Enable` is reference-counted.** FSM modes call `Enable` on enter and `Disable` on exit. If you also call `Enable`/`Disable` manually, the counts must balance. An extra `Enable` without a matching `Disable` keeps the rule alive indefinitely.
-- **Effect errors go to `handleEffectError`, not `ErrorHandler.Report` directly.** If a per-rule `ErrorPolicy` is set, it overrides the global policy for effect errors only. Guard errors always go through `ErrorHandler`.
-- **`CancelTasksWhenGuardFalse` only works with Store guards.** When the store turns false, all in-flight tasks are cancelled with `Task.Reason.GuardFalse`. Function guards do not support this behavior.
-- **`Once` disables after the first admitted run, not the first signal fire.** If the guard is false or the event is throttled/debounced away, `Once` does not trigger.
-- **`Merge` only supports `Overflow.Drop`.** Attempting to combine `Merge` with `Latest` or `Fifo` is a validation error.
-- **Disposers are not called on `Disable`.** They are cleared and called when a new effect starts (replacing the old disposer). If you need cleanup on disable, do it in the effect body using `token:OnCancel`.
-
----
-
-## Complete Example
+# Full Example: Search Restart Semantics
 
 ```luau
-local Rule    = require(path.to.Rule)
-local Signal  = require(path.to.Signal)
-local Store   = require(path.to.Store)
-local Task    = require(path.to.Task)
+local searchRule = Rule.New("Search")
 
-local onMessage = Signal.New()
-local isConnected = Store.Value(true)
-local messageCount = Store.Value(0)
+searchRule:SetPolicy({
+    Concurrency = Rule.Concurrency.Restart,
+})
 
--- A rule that processes messages while connected, with retry and metrics.
-local messageRule = Rule.New("ProcessMessage")
-    :On(onMessage)
-    :When(isConnected)
-    :Run(function(ctx, payload, frame)
-        -- Return a Task — Rule tracks it for concurrency.
-        return Task.Start(function(token)
-            local ok, result = Task.Sleep(0.1, token) -- simulated async work
-            if not ok then return end
-            messageCount:Update(function(n) return n + 1 end)
-            print("processed:", payload)
-        end)
-    end)
-    :Policy({
-        Concurrency = Rule.Concurrency.Merge,
-        Capacity    = 4,              -- max 4 concurrent handlers
-        Throttle    = 0.05,           -- at most one admit per 50ms
-        ErrorPolicy = "Warn",
-        Trace       = true,
-        Tag         = "MessageProcessor",
-    })
-
--- Enable manually with an empty context (no shared state needed).
-messageRule:Enable()
-
--- Fire some events.
-onMessage:Fire("hello")
-onMessage:Fire("world")
-
--- Check metrics.
-local m = messageRule:Metrics()
-print(m.Runs, m.Skipped, m.AvgMs)
-
--- Clean up.
-messageRule:Disable()
-messageRule:Destroy()
+searchRule:Use(function(player, query)
+    return performSearch(query)
+end)
 ```
+
+---
+
+# Full Example: Serial Save Queue
+
+```luau
+local saveRule = Rule.New("Save")
+
+saveRule:SetPolicy({
+    Concurrency = Rule.Concurrency.Serial,
+    MaxQueue = 50,
+})
+
+saveRule:Use(function(player, data)
+    saveProfile(player, data)
+end)
+```
+
+---
+
+# Full Example: Metrics
+
+```luau
+local metrics = rule:GetMetrics()
+
+print(metrics.Started)
+print(metrics.Failed)
+```
+
+---
+
+# Full Example: Tracing
+
+```luau
+Rule.SetTracer(function(event)
+    print(event.Rule, event.Event)
+end)
+```
+
+---
+
+# Summary
+
+Use `Rule` whenever systems need deterministic effect orchestration.
+
+Use:
+
+- policies for concurrency and scheduling;
+- retries for resilience;
+- queues for backpressure;
+- tracing for observability;
+- metrics for monitoring;
+- lifecycle signals for composition.
+
+The result is a declarative execution-control system integrated with the Kernel lifecycle, scheduling, task, signal, and runtime error semantics.
