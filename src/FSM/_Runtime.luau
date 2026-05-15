@@ -1,128 +1,34 @@
 --!strict
-local Connection = require(script.Parent.Connection)
-local Context = require(script.Parent.Context)
-local ErrorHandler = require(script.Parent.ErrorHandler)
-local Rule = require(script.Parent.Rule)
-local Scheduler = require(script.Parent.Scheduler)
-local Signal = require(script.Parent.Signal)
-local Store = require(script.Parent.Store)
-local Task = require(script.Parent.Task)
 
--- ── Types ─────────────────────────────────────────────────────────────────────
+-- FSM runtime owns the single authoritative implementation of the public FSM API.
+-- The parent ModuleScript exports type aliases and returns this runtime table.
+-- No public API is duplicated in facade adapters.
 
-export type TransitionEvent = {
-	From: string,
-	To: string,
-	Reason: string?,
-	Data: unknown?,
-}
+local Connection = require(script.Parent.Parent.Connection)
+local Context = require(script.Parent.Parent.Context)
+local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
+local Rule = require(script.Parent.Parent.Rule)
+local Scheduler = require(script.Parent.Parent.Scheduler)
+local Signal = require(script.Parent.Parent.Signal)
+local Store = require(script.Parent.Parent.Store)
+local Task = require(script.Parent.Parent.Task)
+local Types = require(script.Parent._Types)
+local PolicyHelpers = require(script.Parent._Policy)
 
-export type TransitionFrame = {
-	From: string,
-	To: string,
-	Reason: string?,
-	Data: unknown?,
-	StartedAt: number,
-	Immediate: boolean,
-}
+type TransitionEvent = Types.TransitionEvent
+type TransitionFrame = Types.TransitionFrame
+type UpdateFrame = Types.UpdateFrame
+type SwitchOptions = Types.SwitchOptions
+type SnapshotOptions = Types.SnapshotOptions
+type Snapshot = Types.Snapshot
+type GuardOptions = Types.GuardOptions
+type FSMTraceEvent = Types.FSMTraceEvent
+type Policy = Types.Policy
+type PartialPolicy = Types.PartialPolicy
+type FSM<Ctx> = Types.FSM<Ctx>
+type Mode<Ctx> = Types.Mode<Ctx>
+type FSMModuleType = Types.FSMModuleType
 
-export type UpdateFrame = {
-	Mode: string,
-	StartedAt: number,
-}
-
-export type SwitchOptions = {
-	Immediate: boolean?,
-	Reason: string?,
-	Data: unknown?,
-}
-
-export type SnapshotOptions = {
-	IncludeHistory: boolean?,
-}
-
-export type Snapshot = {
-	ActivePath: { string },
-	History: { [string]: string },
-}
-
-export type GuardOptions = {
-	Priority: number?,
-	Reason: string?,
-	Defer: boolean?,
-	Data: unknown?,
-}
-
-export type FSMTraceEvent = {
-	Event: string,
-	Tag: string?,
-	From: string?,
-	To: string?,
-}
-
-export type Policy = {
-	SingleSwitchPerFrame: boolean,
-	CancelTasksOnExit: boolean,
-	ExitOrdering: string,
-	Deferral: string,
-	ErrorPolicy: string?,
-	Trace: boolean,
-	Tag: string?,
-}
-
-export type PartialPolicy = {
-	SingleSwitchPerFrame: boolean?,
-	CancelTasksOnExit: boolean?,
-	ExitOrdering: string?,
-	Deferral: string?,
-	ErrorPolicy: string?,
-	Trace: boolean?,
-	Tag: string?,
-}
-
-export type FSM<Ctx> = {
-	Context: (self: FSM<Ctx>) -> Context.Context<Ctx>,
-	Mode: (self: FSM<Ctx>, name: string, builder: ((mode: Mode<Ctx>) -> ())?) -> Mode<Ctx>,
-	HasMode: (self: FSM<Ctx>, name: string) -> boolean,
-	GetMode: (self: FSM<Ctx>, name: string) -> Mode<Ctx>?,
-	Start: (self: FSM<Ctx>, name: string) -> (),
-	Switch: (self: FSM<Ctx>, name: string, opts: SwitchOptions?) -> (),
-	CanSwitch: (self: FSM<Ctx>, name: string) -> boolean,
-	Current: (self: FSM<Ctx>) -> string,
-	IsActive: (self: FSM<Ctx>, name: string) -> boolean,
-	InMode: (self: FSM<Ctx>, name: string) -> boolean,
-	Path: (self: FSM<Ctx>) -> { string },
-	History: (self: FSM<Ctx>, parentName: string) -> string?,
-	SwitchToHistory: (self: FSM<Ctx>, parentName: string, opts: SwitchOptions?) -> (),
-	ClearHistory: (self: FSM<Ctx>, parentName: string?) -> (),
-	Snapshot: (self: FSM<Ctx>, opts: SnapshotOptions?) -> Snapshot,
-	Restore: (self: FSM<Ctx>, snapshot: Snapshot, opts: SwitchOptions?) -> (),
-	OnTransition: (self: FSM<Ctx>, fn: (event: TransitionEvent) -> ()) -> Connection.Connection,
-	WaitForTransition: (self: FSM<Ctx>) -> TransitionEvent,
-	Policy: (self: FSM<Ctx>, opts: PartialPolicy) -> FSM<Ctx>,
-	IsStarted: (self: FSM<Ctx>) -> boolean,
-	IsDestroyed: (self: FSM<Ctx>) -> boolean,
-	Destroy: (self: FSM<Ctx>) -> (),
-	IsActiveStore: (self: FSM<Ctx>, name: string) -> Store.ReadableStore<boolean>,
-	ActiveStore: Store.ReadableStore<string>,
-	TransitionSignal: Signal.Signal<TransitionEvent>,
-}
-
-export type Mode<Ctx> = {
-	Name: (self: Mode<Ctx>) -> string,
-	Parent: (self: Mode<Ctx>) -> Mode<Ctx>?,
-	OnEnter: (self: Mode<Ctx>, fn: (ctx: Context.Context<Ctx>, frame: TransitionFrame) -> any) -> Mode<Ctx>,
-	OnExit: (self: Mode<Ctx>, fn: (ctx: Context.Context<Ctx>, frame: TransitionFrame) -> any) -> Mode<Ctx>,
-	OnUpdate: (self: Mode<Ctx>, fn: (ctx: Context.Context<Ctx>, dt: number, frame: UpdateFrame) -> ()) -> Mode<Ctx>,
-	Add: (self: Mode<Ctx>, resource: any) -> Mode<Ctx>,
-	Provide: (self: Mode<Ctx>, providerOrValues: any) -> Mode<Ctx>,
-	Guard: (self: Mode<Ctx>, to: string, guard: any, opts: GuardOptions?) -> Mode<Ctx>,
-	TaskGroup: (self: Mode<Ctx>) -> Task.TaskGroup,
-	Tag: (self: Mode<Ctx>, label: string) -> Mode<Ctx>,
-	IsActive: (self: Mode<Ctx>) -> boolean,
-	IsDestroyed: (self: Mode<Ctx>) -> boolean,
-	Destroy: (self: Mode<Ctx>) -> (),
-}
 
 -- ── Internal records ──────────────────────────────────────────────────────────
 
@@ -243,65 +149,8 @@ local modeMeta = {
 
 -- ── Policy helpers ────────────────────────────────────────────────────────────
 
-local KNOWN_FSM_POLICY_KEYS: { [string]: boolean } = {
-	SingleSwitchPerFrame = true, CancelTasksOnExit = true,
-	ExitOrdering = true, Deferral = true,
-	ErrorPolicy = true, Trace = true, Tag = true,
-}
-
-local function makeDefaultPolicy(): PolicyRecord
-	return {
-		SingleSwitchPerFrame = true,
-		CancelTasksOnExit = true,
-		ExitOrdering = "LeafFirst",
-		Deferral = "Queue",
-		ErrorPolicy = nil,
-		Trace = false,
-		Tag = nil,
-	}
-end
-
-local function validateFSMPolicy(policy: PartialPolicy): (boolean, string?)
-	if type(policy) ~= "table" then
-		return false, "policy must be a table"
-	end
-	for k in policy do
-		if not KNOWN_FSM_POLICY_KEYS[k :: any] then
-			return false, "unknown policy key: " .. tostring(k)
-		end
-	end
-	local spf = policy.SingleSwitchPerFrame
-	if spf ~= nil and type(spf) ~= "boolean" then
-		return false, "SingleSwitchPerFrame must be a boolean"
-	end
-	local cte = policy.CancelTasksOnExit
-	if cte ~= nil and type(cte) ~= "boolean" then
-		return false, "CancelTasksOnExit must be a boolean"
-	end
-	local eo = policy.ExitOrdering
-	if eo ~= nil and eo ~= "LeafFirst" and eo ~= "ParentFirst" then
-		return false, "ExitOrdering must be 'LeafFirst' or 'ParentFirst'"
-	end
-	local def = policy.Deferral
-	if def ~= nil and def ~= "Queue" and def ~= "Drop" then
-		return false, "Deferral must be 'Queue' or 'Drop'"
-	end
-	local ep = policy.ErrorPolicy
-	if ep ~= nil then
-		if ep ~= "Throw" and ep ~= "Warn" and ep ~= "Swallow" and ep ~= "Collect" then
-			return false, "ErrorPolicy must be 'Throw', 'Warn', 'Swallow', or 'Collect'"
-		end
-	end
-	local tr = policy.Trace
-	if tr ~= nil and type(tr) ~= "boolean" then
-		return false, "Trace must be a boolean"
-	end
-	local tag = policy.Tag
-	if tag ~= nil and type(tag) ~= "string" then
-		return false, "Tag must be a string"
-	end
-	return true, nil
-end
+local makeDefaultPolicy = PolicyHelpers.MakeDefaultPolicy
+local validateFSMPolicy = PolicyHelpers.ValidatePolicy
 
 -- ── Mode parent / path helpers ────────────────────────────────────────────────
 
@@ -1466,32 +1315,9 @@ function modeMethods:Destroy(): ()
 end
 
 -- Enum tables: use FSM.ExitOrdering.LeafFirst etc. instead of raw strings in Policy.
-FSM.ExitOrdering = table.freeze({
-	LeafFirst = "LeafFirst" :: "LeafFirst",
-	ParentFirst = "ParentFirst" :: "ParentFirst",
-})
+FSM.ExitOrdering = PolicyHelpers.ExitOrdering
+FSM.Deferral = PolicyHelpers.Deferral
 
-FSM.Deferral = table.freeze({
-	Queue = "Queue" :: "Queue",
-	Drop = "Drop" :: "Drop",
-})
-
-export type FSMModuleType = {
-	New: <Ctx>(ctx: Context.Context<Ctx> | { [any]: any }, opts: PartialPolicy?) -> FSM<Ctx>,
-	IsFSM: (value: unknown) -> boolean,
-	IsMode: (value: unknown) -> boolean,
-	DefaultPolicy: () -> Policy,
-	ValidatePolicy: (policy: PartialPolicy) -> (boolean, string?),
-	SetTracer: (fn: ((FSMTraceEvent) -> ())?) -> (),
-	ExitOrdering: {
-		LeafFirst: "LeafFirst",
-		ParentFirst: "ParentFirst",
-	},
-	Deferral: {
-		Queue: "Queue",
-		Drop: "Drop",
-	},
-}
 
 return FSM :: FSMModuleType
 

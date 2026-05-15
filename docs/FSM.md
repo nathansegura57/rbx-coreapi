@@ -1,726 +1,1330 @@
-# FSM
+# FSM API Reference
 
-A hierarchical finite state machine. An FSM organizes behavior into named modes. Entering a mode runs `OnEnter`; leaving runs `OnExit`. Modes can have parent modes (forming a tree), guards that trigger automatic transitions, providers that inject values into a mode-scoped `Context` layer, and attached `Rule`s that enable and disable with the mode.
+`FSM` is the hierarchical finite-state-machine primitive for CoreAPI.
 
----
+Place this module at:
 
-## Enum Tables
-
-### `FSM.ExitOrdering`
-
-```luau
-FSM.ExitOrdering.LeafFirst   -- (default) exit child modes before parents
-FSM.ExitOrdering.ParentFirst -- exit parent modes before children
+```text
+ReplicatedStorage/Shared/Kernel/FSM
 ```
 
-### `FSM.Deferral`
-
-Controls behavior when `Switch` is called during an in-progress transition:
-
-```luau
-FSM.Deferral.Queue  -- (default) queue the switch; drain after transition completes
-FSM.Deferral.Drop   -- discard the switch if a transition is in progress
-```
-
----
-
-## API Reference
-
-### `FSM.New(ctx, opts?)`
-
-Creates a new FSM. `ctx` may be a plain table (wrapped into `Context.Root` automatically) or an existing `Context`.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `ctx` | `Context \| { [any]: any }` | Shared context or initial values table |
-| `opts` | `PartialPolicy?` | Optional policy overrides |
-
-**Returns:** `FSM<Ctx>`
-
-**Errors:**
-- `FSM.New: ctx must be a table or Context`
-- `FSM.New: {policy validation message}`
-
----
-
-### `FSM.IsFSM(value)` / `FSM.IsMode(value)`
-
-Return `true` if `value` is a valid FSM or Mode handle.
-
----
-
-### `FSM.DefaultPolicy()`
-
-Returns a copy of the default policy.
-
-**Returns:** `Policy`
-
----
-
-### `FSM.ValidatePolicy(policy)`
-
-Validates a partial policy without applying it.
-
-**Returns:** `(boolean, string?)`
-
----
-
-### `FSM.SetTracer(fn?)`
-
-Installs a global FSM tracer. Pass `nil` to remove.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `fn` | `((TraceEvent) -> ())?` | Receives a trace payload table |
-
-Trace events: `FSM.Start`, `FSM.Transition`, `FSM.Destroy`. The payload always includes `Event` and `Tag` (if set), plus `From`/`To` for transitions.
-
----
-
-### FSM Policy
-
-Set via `fsm:Policy(opts)` or the second argument to `FSM.New`. All fields are optional and merge into defaults.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `SingleSwitchPerFrame` | `boolean?` | `true` | Coalesce multiple `Switch` calls per frame into the last one |
-| `CancelTasksOnExit` | `boolean?` | `true` | Cancel the mode's task group on exit |
-| `ExitOrdering` | `string?` | `"LeafFirst"` | Use `FSM.ExitOrdering.*` |
-| `Deferral` | `string?` | `"Queue"` | Use `FSM.Deferral.*` |
-| `ErrorPolicy` | `string?` | `nil` | Override global error policy for `Enter`/`Exit` errors |
-| `Trace` | `boolean?` | `false` | Enable tracing |
-| `Tag` | `string?` | `nil` | Label for traces |
-
-**Validation errors:**
-- `FSM.New: policy must be a table`
-- `FSM.New: unknown policy key: {k}`
-- `FSM.New: SingleSwitchPerFrame must be a boolean`
-- `FSM.New: CancelTasksOnExit must be a boolean`
-- `FSM.New: ExitOrdering must be 'LeafFirst' or 'ParentFirst'`
-- `FSM.New: Deferral must be 'Queue' or 'Drop'`
-- `FSM.New: ErrorPolicy must be 'Throw', 'Warn', 'Swallow', or 'Collect'`
-- `FSM.New: Trace must be a boolean`
-- `FSM.New: Tag must be a string`
-
----
-
-### FSM Instance Methods
-
-#### `fsm:Context()`
-
-Returns the FSM's root context.
-
-**Returns:** `Context`
-
-**Errors:** `FSM.Context: FSM is destroyed`
-
----
-
-#### `fsm:Mode(name, builder?)`
-
-Gets or creates a mode. If `name` already exists, returns the existing mode. If `builder` is provided, calls `builder(mode)` before returning.
-
-Dot-notation names (`"parent.child"`) establish implicit parent relationships if `"parent"` is registered.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `name` | `string` | Non-empty mode name; may use dot notation |
-| `builder` | `((mode: Mode) -> ())?` | Optional configuration callback |
-
-**Returns:** `Mode<Ctx>`
-
-**Errors:**
-- `FSM.Mode: FSM is destroyed`
-- `FSM.Mode: name must be a non-empty string`
-- `FSM.Mode: builder must be a function or nil`
-
----
-
-#### `fsm:HasMode(name)` / `fsm:GetMode(name)`
-
-Check or retrieve a registered mode by name. `GetMode` returns `nil` if not found.
-
----
-
-#### `fsm:Start(name)`
-
-Enters the initial mode. Must be called exactly once.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `name` | `string` | The initial mode; must be registered |
-
-**Errors:**
-- `FSM.Start: FSM is destroyed`
-- `FSM.Start: already started`
-- `FSM.Start: mode '{name}' not registered`
-- `FSM.Start: guard in mode '{m}' targets unregistered mode '{to}'`
-
----
-
-#### `fsm:Switch(name, opts?)`
-
-Requests a transition to `name`. By default, deferred to next frame (controlled by `SingleSwitchPerFrame`). Immediate transitions may be requested via `opts.Immediate = true`.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `name` | `string` | Target mode; must be registered |
-| `opts` | `SwitchOptions?` | Optional options |
-
-**`SwitchOptions` fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `Immediate` | `boolean?` | Execute transition synchronously |
-| `Reason` | `string?` | Stored in `TransitionFrame.Reason` |
-| `Data` | `unknown?` | Stored in `TransitionFrame.Data` |
-
-**Errors:**
-- `FSM.Switch: FSM is destroyed`
-- `FSM.Switch: FSM has not started`
-- `FSM.Switch: mode '{name}' not registered`
-- `FSM.Switch: opts must be a table or nil`
-
----
-
-#### `fsm:CanSwitch(name)`
-
-Returns `true` if switching to `name` is currently possible (FSM is started, not destroyed, mode exists, and `name` differs from the current leaf).
-
-**Returns:** `boolean`
-
----
-
-#### `fsm:Current()`
-
-Returns the name of the current leaf mode, or `""` if not started.
-
-**Returns:** `string`
-
----
-
-#### `fsm:IsActive(name)`
-
-Returns `true` if `name` is anywhere in the active path (including parent modes).
-
-**Returns:** `boolean`
-
----
-
-#### `fsm:InMode(name)`
-
-Returns `true` if `name` is the current leaf mode.
-
-**Returns:** `boolean`
-
----
-
-#### `fsm:Path()`
-
-Returns a clone of the active mode path from root to leaf.
-
-**Returns:** `{ string }`
-
-```luau
--- For FSM in mode "game.playing.combat":
-fsm:Path()  -- { "game", "game.playing", "game.playing.combat" }
+`FSM` exists to model:
+
+- application flow;
+- gameplay state;
+- AI behavior;
+- UI navigation;
+- interaction modes;
+- nested substates;
+- guarded transitions;
+- lifecycle ownership;
+- scoped resources;
+- state-local tasks;
+- declarative transition orchestration.
+
+It integrates deeply with the rest of the Kernel:
+
+```text
+Connection
+Context
+ErrorHandler
+Rule
+Scheduler
+Signal
+Store
+Task
 ```
 
 ---
 
-#### `fsm:History(parentName)`
+# Design Goals
 
-Returns the name of the last active child mode under `parentName`, or `nil` if none.
+`FSM` is designed around one central principle:
 
----
+> state transitions should be declarative infrastructure, not scattered imperative logic.
 
-#### `fsm:SwitchToHistory(parentName, opts?)`
+Instead of manually coordinating:
 
-Switches to the last active child mode of `parentName` if history exists. No-op if no history is recorded for that parent.
+- enter callbacks;
+- exit callbacks;
+- cleanup;
+- async cancellation;
+- dependency scope;
+- transition ordering;
+- history;
+- guards;
+- update loops;
 
----
-
-#### `fsm:ClearHistory(parentName?)`
-
-Clears history for `parentName`, or all history if `parentName` is `nil`.
-
----
-
-#### `fsm:Snapshot(opts?)`
-
-Captures the current active path and history map.
-
-**Returns:** `Snapshot` — `{ ActivePath: { string }, History: { [string]: string } }`
+an FSM centralizes those behaviors into one deterministic transition system.
 
 ---
 
-#### `fsm:Restore(snapshot, opts?)`
+# Core Mental Model
 
-Switches to the leaf mode from `snapshot.ActivePath` and restores the history map. The transition uses `Reason = "Restore"` and `Data = snapshot`.
+An FSM owns:
 
-**Errors:**
-- `FSM.Restore: FSM is destroyed`
-- `FSM.Restore: FSM has not started`
+```text
+mode hierarchy
+    ↓
+transition policy
+    ↓
+state lifecycle
+    ↓
+scoped ownership
+    ↓
+reactive observability
+```
 
----
+Modes are not just names.
 
-#### `fsm:OnTransition(fn)`
+Each mode owns:
 
-Subscribes to all transition events. Called after every mode switch.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `fn` | `(event: TransitionEvent) -> ()` | Receives a `TransitionEvent` |
-
-**Returns:** `Connection.Connection`
-
-**`TransitionEvent` fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `From` | `string` | Previous leaf mode name (empty string on start) |
-| `To` | `string` | New leaf mode name |
-| `Reason` | `string?` | Transition reason, if provided |
-| `Data` | `unknown?` | Transition data, if provided |
+- lifecycle callbacks;
+- scoped dependencies;
+- task groups;
+- cleanup resources;
+- transition guards;
+- nested hierarchy.
 
 ---
 
-#### `fsm:WaitForTransition()`
-
-Yields until the next transition, then returns the `TransitionEvent`. Must be called from a yieldable coroutine.
-
-**Returns:** `TransitionEvent`
-
-**Errors:**
-- `FSM.WaitForTransition: FSM destroyed`
-
----
-
-#### `fsm:Policy(opts)`
-
-Updates the FSM policy. Cannot be called after `Start`.
-
-**Returns:** `self`
-
-**Errors:**
-- `FSM.Policy: FSM is destroyed`
-- `FSM.Policy: cannot change policy after start`
-- `FSM.Policy: {validation message}`
-
----
-
-#### `fsm:IsStarted()` / `fsm:IsDestroyed()`
-
-**Returns:** `boolean`
-
----
-
-#### `fsm:IsActiveStore(name)`
-
-Returns a `ReadableStore<boolean>` that is `true` while `name` is in the active path. Created lazily and cached.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `name` | `string` | Non-empty mode name |
-
-**Returns:** `ReadableStore<boolean>`
-
-**Errors:**
-- `FSM.IsActiveStore: invalid FSM handle`
-- `FSM.IsActiveStore: name must be a non-empty string`
+# Importing
 
 ```luau
-local isPlaying = fsm:IsActiveStore("playing")
-isPlaying:Subscribe(function(active)
-    hud:SetVisible(active)
-end)
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local FSM = require(ReplicatedStorage.Shared.Kernel.FSM)
 ```
 
 ---
 
-#### `fsm.ActiveStore`
+# Relationship to Other Kernel Modules
 
-A `ReadableStore<string>` that always holds the current leaf mode name. Updated on every transition.
+# Relationship to `Context`
+
+Each mode owns a scoped `Context`.
+
+Dependencies provided inside a mode become active only while that mode is active.
+
+This allows:
+
+- hierarchical dependency injection;
+- state-local services;
+- scoped cleanup ownership.
+
+---
+
+# Relationship to `Task`
+
+Each mode owns a `Task.TaskGroup`.
+
+Tasks started within a mode can automatically cancel on exit.
+
+---
+
+# Relationship to `Rule`
+
+Rules naturally compose with FSM transitions.
+
+Common patterns include:
+
+- guarded transitions;
+- cooldown transitions;
+- async transition orchestration;
+- serialized actions.
+
+---
+
+# Relationship to `Signal`
+
+FSM exposes lifecycle signals:
+
+- transitions;
+- active mode changes;
+- updates.
+
+These integrate naturally with reactive systems.
+
+---
+
+# Relationship to `Store`
+
+FSM exposes reactive stores representing:
+
+- active state;
+- mode activity;
+- transition state.
+
+---
+
+# Relationship to `ErrorHandler`
+
+Lifecycle callback failures route through `ErrorHandler`.
+
+This includes:
+
+- enter callbacks;
+- exit callbacks;
+- update callbacks;
+- guard callbacks;
+- tracer callbacks.
+
+Usage errors still raise immediately.
+
+---
+
+# Exported Types
+
+# `FSM.FSM<ContextValue>`
 
 ```luau
-fsm.ActiveStore:Subscribe(function(mode)
-    print("now in:", mode)
-end)
+type FSM<ContextValue> = opaque
 ```
 
----
+Primary finite-state-machine handle.
 
-#### `fsm.TransitionSignal`
+Owns:
 
-A `Signal<TransitionEvent>` that fires on every transition. Equivalent to `fsm:OnTransition(fn)` but exposes the raw signal for composing with operators.
-
----
-
-#### `fsm:Destroy()`
-
-Exits all active modes (running `OnExit`), cancels all task groups, destroys the `TransitionSignal`, and tears down internal stores. Idempotent.
-
----
-
-### Mode Instance Methods
-
-#### `mode:Name()`
-
-Returns the mode's registered name.
-
-**Returns:** `string`
+- mode graph;
+- transition policy;
+- active path;
+- lifecycle;
+- scoped resources;
+- guards;
+- history;
+- tracing;
+- destruction.
 
 ---
 
-#### `mode:Parent()`
-
-Returns the parent Mode handle, or `nil`.
-
----
-
-#### `mode:OnEnter(fn)`
-
-Registers a callback called when this mode is entered.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `fn` | `(ctx: Context, frame: TransitionFrame) -> any` | May return a cleanup `() -> ()` or a `Task` |
-
-**Returns:** `self`
-
-**`TransitionFrame` fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `From` | `string` | Previous leaf mode |
-| `To` | `string` | New leaf mode |
-| `Reason` | `string?` | Provided reason |
-| `Data` | `unknown?` | Provided data |
-| `StartedAt` | `number` | `Scheduler.Now()` at transition start |
-| `Immediate` | `boolean` | Whether this was an immediate transition |
-
-**Return value behavior:**
-- `() -> ()` — registered as an active disposer; called on exit
-- `Task.Task<any>` — added to the mode's task group (cancelled on exit if `CancelTasksOnExit`)
-- `nil` — no additional cleanup
-
-**Errors:**
-- `Mode.OnEnter: mode is destroyed`
-- `Mode.OnEnter: fn must be a function`
-
----
-
-#### `mode:OnExit(fn)`
-
-Registers a callback called when this mode is exited. Same signature and return-value behavior as `OnEnter`.
-
-> **Note:** Async exits are not supported. If `fn` returns a `Task`, a warning is routed through `ErrorHandler` and the task is ignored.
-
-**Errors:**
-- `Mode.OnExit: mode is destroyed`
-- `Mode.OnExit: fn must be a function`
-
----
-
-#### `mode:OnUpdate(fn)`
-
-Registers a per-frame callback connected to `Scheduler.OnStep` while the mode is active.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `fn` | `(ctx: Context, dt: number, frame: UpdateFrame) -> ()` | Called every frame |
-
-**`UpdateFrame` fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `Mode` | `string` | Mode name |
-| `StartedAt` | `number` | Time the mode was entered |
-
-**Errors:**
-- `Mode.OnUpdate: mode is destroyed`
-- `Mode.OnUpdate: fn must be a function`
-
----
-
-#### `mode:Add(resource)`
-
-Attaches a resource to this mode:
-
-- **`Rule`** — enabled on mode enter, disabled on mode exit
-- **`Task`** — added to the mode's task group
-- **`Mode`** — establishes explicit parent relationship (alternative to dot-naming)
-- **`function(ctx, frame) -> any`** — factory; runs on enter, return value treated like `OnEnter` return
-
-**Errors:**
-- `Mode.Add: mode is destroyed`
-- `Mode.Add: duplicate rule`
-- `Mode.Add: invalid mode handle`
-- `Mode.Add: child mode must belong to the same FSM`
-- `Mode.Add: mode already has a parent (re-parenting is not allowed)`
-- `Mode.Add: cycle detected in parent hierarchy`
-- `Mode.Add: expected Rule, Task, Mode, or function`
-
----
-
-#### `mode:Provide(providerOrValues)`
-
-Injects values into the mode's context layer.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `providerOrValues` | `(ctx, frame) -> (table, cleanup?)  \| table` | Function or table of key→value pairs |
-
-When a **function** is provided:
-- Called with `(parentCtx, frame)` on mode enter
-- First return value must be a table of key→value pairs
-- Second return value (optional) is a cleanup function called when the mode context layer is destroyed
-
-When a **table** is provided:
-- Values are merged directly into the mode context layer on enter
-
-**Errors:**
-- `Mode.Provide: mode is destroyed`
-- `Mode.Provide: providerOrValues must be a function or table`
+# `FSM.Mode<ContextValue>`
 
 ```luau
--- Table form: static values.
-mode:Provide({ RoundId = os.time() })
-
--- Function form: dynamic values + cleanup.
-mode:Provide(function(ctx, frame)
-    local svc = MyService.New()
-    return { Service = svc }, function()
-        svc:Cleanup()
-    end
-end)
+type Mode<ContextValue> = opaque
 ```
 
+Represents one state node.
+
+Modes may be:
+
+- root modes;
+- nested child modes;
+- active;
+- inactive;
+- destroyed.
+
 ---
 
-#### `mode:Guard(to, guard, opts?)`
-
-Registers an automatic transition from this mode to `to` when `guard` passes.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `to` | `string` | Target mode name; validated on `fsm:Start` |
-| `guard` | `Store.ReadableStore<boolean> \| (ctx, frame) -> boolean` | Store or function |
-| `opts` | `GuardOptions?` | Optional options |
-
-**`GuardOptions` fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `Priority` | `number?` | Higher priority guards are evaluated first (default `0`) |
-| `Reason` | `string?` | Passed as `TransitionFrame.Reason` |
-| `Data` | `unknown?` | Passed as `TransitionFrame.Data` |
-| `Defer` | `boolean?` | If `true`, deferred-switch; otherwise immediate (default `false`) |
-
-**Store guards** — subscribed (without immediate fire) while the mode is active. When the store becomes `true`, the switch is triggered.
-
-**Function guards** — evaluated once on mode enter, sorted by priority descending. If any guard returns `true`, the corresponding switch fires (deferred if `Defer = true`, immediate otherwise). Only the first matching guard fires.
-
-**Errors:**
-- `Mode.Guard: mode is destroyed`
-- `Mode.Guard: to must be a non-empty string`
-- `Mode.Guard: guard must be a Store or function`
-- `FSM.Start: guard in mode '{m}' targets unregistered mode '{to}'`
+# `FSM.Policy`
 
 ```luau
--- Store guard: auto-switch to "gameover" when health hits zero.
-local isDead = Store.Derive(function() return health:Get() <= 0 end, { health })
-playing:Guard("gameover", isDead, { Reason = "Death" })
-
--- Function guard: auto-switch to "idle" if loading takes too long.
-loading:Guard("idle", function(ctx, frame)
-    return (Scheduler.Now() - frame.StartedAt) > 10
-end, { Defer = true })
+type Policy = {
+    SingleSwitchPerFrame: boolean,
+    CancelTasksOnExit: boolean,
+    ExitOrdering: FSM.ExitOrdering,
+    Deferral: FSM.Deferral,
+    ErrorPolicy: string?,
+    Trace: boolean,
+    Tag: string?,
+}
 ```
 
----
-
-#### `mode:TaskGroup()`
-
-Returns (or lazily creates) the mode's `TaskGroup`. Use this to track tasks that should be cancelled when the mode exits.
-
-**Returns:** `Task.TaskGroup`
-
-**Errors:** `Mode.TaskGroup: invalid mode handle`
+Defines transition behavior.
 
 ---
 
-#### `mode:Tag(label)`
+# `FSM.PartialPolicy`
 
-Sets a display label for the mode (used in tracing).
-
-**Returns:** `self`
-
----
-
-#### `mode:IsActive()`
-
-Returns `true` if this mode is currently in the FSM's active path.
-
-**Returns:** `boolean`
-
----
-
-#### `mode:IsDestroyed()`
-
-Returns `true` if this mode has been destroyed.
-
----
-
-#### `mode:Destroy()`
-
-Removes the mode from the FSM, destroys its attached rules, and clears its task group. Cannot be called while the mode is active.
-
-**Errors:** `Mode.Destroy: cannot destroy active mode`
-
----
-
-## Hierarchical Modes
-
-Modes can be nested in a tree. The active path is the sequence of modes from the tree root to the current leaf.
-
-**Dot notation (implicit parenting):**
 ```luau
-local game    = fsm:Mode("game")
-local playing = fsm:Mode("game.playing")  -- parent is "game"
-local combat  = fsm:Mode("game.playing.combat")
+type PartialPolicy = {
+    SingleSwitchPerFrame: boolean?,
+    CancelTasksOnExit: boolean?,
+    ExitOrdering: FSM.ExitOrdering?,
+    Deferral: FSM.Deferral?,
+    ErrorPolicy: string?,
+    Trace: boolean?,
+    Tag: string?,
+}
 ```
 
-**Explicit parenting via `Add`:**
+Used for partial updates.
+
+---
+
+# `FSM.ExitOrdering`
+
 ```luau
-local game    = fsm:Mode("game")
-local playing = fsm:Mode("playing")
-game:Add(playing)  -- establishes game as playing's parent
+FSM.ExitOrdering.LeafFirst
+FSM.ExitOrdering.ParentFirst
 ```
 
-**Transition mechanics:**
-- Only modes that are _different_ between the from-path and to-path are exited/entered.
-- The LCA (Lowest Common Ancestor) is preserved — modes shared by both paths are not re-entered.
-- `ExitOrdering.LeafFirst` exits in `[leaf, ..., lca+1]` order (default).
-- `ExitOrdering.ParentFirst` exits in `[lca+1, ..., leaf]` order.
+Controls hierarchical exit ordering.
 
 ---
 
-## Gotchas
-
-- **`Switch` is deferred by default.** With `SingleSwitchPerFrame = true` (the default), multiple `Switch` calls in the same frame coalesce into the last one. Use `opts.Immediate = true` to bypass this.
-- **OnExit cannot be async.** If an `OnExit` callback returns a Task, a route error is reported and the task is ignored. Run cleanup synchronously or pre-cancel the task before exit.
-- **Guard function evaluation is one-shot on enter.** Function guards (unlike Store guards) are evaluated once when the mode is entered. If you need continuous evaluation, use a Store guard.
-- **Guard targets are validated on `Start`.** If any guard targets a mode that has not been registered, `fsm:Start` throws. Register all modes before starting.
-- **Provider errors route through `handleFSMError`.** Provider function errors are reported per the FSM's `ErrorPolicy`, not the global policy. Provider cleanup errors go through `ErrorHandler`.
-- **`CancelTasksOnExit = true` cancels with `Task.Reason.ModeExit`.** Tasks returned from `OnEnter` are tracked in the mode's task group. When the mode exits, the group is cancelled.
-- **`IsActiveStore` and `ActiveStore` update during transitions.** They are set before `OnEnter` runs for entering modes, so guards and `OnEnter` callbacks can read them.
-- **Re-parenting is not allowed.** Once a mode has been added to a parent via `mode:Add(child)` or dot notation, it cannot be moved. Attempting to re-parent throws.
-
----
-
-## Complete Example
+# `FSM.Deferral`
 
 ```luau
-local Context = require(path.to.Context)
-local FSM     = require(path.to.FSM)
-local Rule    = require(path.to.Rule)
-local Signal  = require(path.to.Signal)
-local Store   = require(path.to.Store)
-local Task    = require(path.to.Task)
+FSM.Deferral.Queue
+FSM.Deferral.Drop
+```
 
--- Shared state
-local score   = Store.Value(0)
-local health  = Store.Value(100)
+Controls transition deferral semantics.
 
--- FSM with a shared context
-local game = FSM.New({ Score = score, Health = health }, {
-    SingleSwitchPerFrame = true,
-    CancelTasksOnExit    = true,
+---
+
+# `FSM.SwitchOptions`
+
+```luau
+type SwitchOptions = {
+    Immediate: boolean?,
+    Reason: string?,
+    Data: unknown?,
+}
+```
+
+Transition options.
+
+---
+
+# `FSM.Snapshot`
+
+```luau
+type Snapshot = {
+    ActivePath: { string },
+    History: { [string]: string },
+}
+```
+
+Serializable FSM snapshot.
+
+---
+
+# `FSM.TransitionFrame`
+
+```luau
+type TransitionFrame = {
+    From: string,
+    To: string,
+    Reason: string?,
+    Data: unknown?,
+    StartedAt: number,
+    Immediate: boolean,
+}
+```
+
+Represents one active transition execution.
+
+---
+
+# `FSM.TransitionEvent`
+
+```luau
+type TransitionEvent = {
+    From: string,
+    To: string,
+    Reason: string?,
+    Data: unknown?,
+}
+```
+
+Transition signal payload.
+
+---
+
+# `FSM.TraceEvent`
+
+```luau
+type TraceEvent = {
+    Event: string,
+    Tag: string?,
+    From: string?,
+    To: string?,
+}
+```
+
+Tracing payload.
+
+---
+
+# `FSM.GuardOptions`
+
+```luau
+type GuardOptions = {
+    Priority: number?,
+    Reason: string?,
+    Data: unknown?,
+    Defer: boolean?,
+}
+```
+
+Guard configuration.
+
+---
+
+# `FSM.UpdateFrame`
+
+```luau
+type UpdateFrame = {
+    Mode: string,
+    StartedAt: number,
+}
+```
+
+Per-update lifecycle payload.
+
+---
+
+# Public Constants
+
+# `FSM.ExitOrdering`
+
+Controls hierarchical exit ordering.
+
+| Value | Meaning |
+|---|---|
+| `LeafFirst` | Exit deepest active child first. |
+| `ParentFirst` | Exit parent before children. |
+
+---
+
+# `FSM.Deferral`
+
+Controls transition conflict behavior.
+
+| Value | Meaning |
+|---|---|
+| `Queue` | Queue transition requests. |
+| `Drop` | Ignore conflicting transition requests. |
+
+---
+
+# Constructors
+
+# `FSM.New`
+
+```luau
+FSM.New<ContextValue>(
+    contextOrValues: ContextValue,
+    policyOverrides: FSM.PartialPolicy?
+): FSM.FSM<ContextValue>
+```
+
+Creates a new finite-state-machine.
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|---|---:|---:|---|
+| `contextOrValues` | `ContextValue` | Yes | Root context values. |
+| `policyOverrides` | `FSM.PartialPolicy?` | No | Optional policy overrides. |
+
+## Returns
+
+| Type | Description |
+|---|---|
+| `FSM.FSM<ContextValue>` | New FSM instance. |
+
+## Example
+
+```luau
+local machine = FSM.New({
+    Player = player,
 })
+```
 
--- ── Modes ────────────────────────────────────────────────────────────────────
+---
 
-local idle = game:Mode("idle")
-idle:OnEnter(function(ctx, frame)
-    print("idle — waiting for player")
-    score:Set(0)
-    health:Set(100)
-end)
+# `FSM.IsFSM`
 
-local loading = game:Mode("loading")
-loading:OnEnter(function(ctx, frame)
-    return Task.Start(function(token)
-        local ok = Task.Sleep(2, token)
-        if not ok then return end
-        game:Switch("playing")
+```luau
+FSM.IsFSM(value: unknown): boolean
+```
+
+Returns whether a value is a live FSM handle.
+
+---
+
+# `FSM.IsMode`
+
+```luau
+FSM.IsMode(value: unknown): boolean
+```
+
+Returns whether a value is a live mode handle.
+
+---
+
+# `FSM.DefaultPolicy`
+
+```luau
+FSM.DefaultPolicy(): FSM.Policy
+```
+
+Returns a fresh default policy snapshot.
+
+## Default Values
+
+```luau
+{
+    SingleSwitchPerFrame = true,
+    CancelTasksOnExit = true,
+    ExitOrdering = FSM.ExitOrdering.LeafFirst,
+    Deferral = FSM.Deferral.Queue,
+    ErrorPolicy = nil,
+    Trace = false,
+    Tag = nil,
+}
+```
+
+---
+
+# `FSM.ValidatePolicy`
+
+```luau
+FSM.ValidatePolicy(
+    policy: FSM.PartialPolicy
+): (boolean, string?)
+```
+
+Validates policy structure.
+
+Returns:
+
+```luau
+(valid, message)
+```
+
+---
+
+# `FSM.SetTracer`
+
+```luau
+FSM.SetTracer(
+    tracer: ((FSM.TraceEvent) -> ())?
+): ()
+```
+
+Sets the global tracing callback.
+
+Passing `nil` disables tracing.
+
+Tracer failures route through `ErrorHandler`.
+
+---
+
+# Mode Construction
+
+# `fsm:Mode`
+
+```luau
+fsm:Mode(
+    name: string,
+    builder: ((FSM.Mode<ContextValue>) -> ())?
+): FSM.Mode<ContextValue>
+```
+
+Creates or retrieves a mode.
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|---|---:|---:|---|
+| `name` | `string` | Yes | Mode name. |
+| `builder` | `((Mode) -> ())?` | No | Declarative mode builder. |
+
+## Example
+
+```luau
+fsm:Mode("Idle", function(mode)
+    mode:OnEnter(function(context)
+        print("entered idle")
     end)
 end)
--- Fall back to idle if loading takes > 5 seconds.
-loading:Guard("idle", function(ctx, frame)
-    return (Scheduler.Now() - frame.StartedAt) > 5
-end, { Defer = true, Reason = "LoadTimeout" })
+```
 
-local playing = game:Mode("playing")
+---
 
--- Provider: inject a per-round signal into the mode context.
-local onEnemyKilled = Signal.New()
-playing:Provide({ EnemyKilledSignal = onEnemyKilled })
+# `fsm:HasMode`
 
-playing:OnEnter(function(ctx, frame)
-    print("playing! from:", frame.From)
+```luau
+fsm:HasMode(name: string): boolean
+```
+
+Returns whether the mode exists.
+
+---
+
+# `fsm:GetMode`
+
+```luau
+fsm:GetMode(name: string): FSM.Mode<ContextValue>?
+```
+
+Returns a mode by name.
+
+---
+
+# Mode APIs
+
+# `mode:Name`
+
+```luau
+mode:Name(): string
+```
+
+Returns the mode name.
+
+---
+
+# `mode:Parent`
+
+```luau
+mode:Parent(): FSM.Mode<ContextValue>?
+```
+
+Returns the parent mode.
+
+---
+
+# `mode:OnEnter`
+
+```luau
+mode:OnEnter(
+    callback: (
+        Context.Context<any>,
+        FSM.TransitionFrame
+    ) -> unknown
+): FSM.Mode<ContextValue>
+```
+
+Registers enter callback.
+
+## Runtime Error Behavior
+
+Callback failures route through `ErrorHandler`.
+
+---
+
+# `mode:OnExit`
+
+```luau
+mode:OnExit(
+    callback: (
+        Context.Context<any>,
+        FSM.TransitionFrame
+    ) -> unknown
+): FSM.Mode<ContextValue>
+```
+
+Registers exit callback.
+
+---
+
+# `mode:OnUpdate`
+
+```luau
+mode:OnUpdate(
+    callback: (
+        Context.Context<any>,
+        number,
+        FSM.UpdateFrame
+    ) -> ()
+): FSM.Mode<ContextValue>
+```
+
+Registers update callback.
+
+Update callbacks typically run from heartbeat/update integration.
+
+---
+
+# `mode:Add`
+
+```luau
+mode:Add(resource: unknown): FSM.Mode<ContextValue>
+```
+
+Adds cleanup-owned resource.
+
+Resources are destroyed/disconnected on mode exit.
+
+---
+
+# `mode:Provide`
+
+```luau
+mode:Provide(
+    providerOrValues: unknown
+): FSM.Mode<ContextValue>
+```
+
+Adds scoped context values/providers.
+
+---
+
+# `mode:Guard`
+
+```luau
+mode:Guard(
+    to: string,
+    guard: Store.ReadableStore<boolean>
+        | ((Context.Context<any>, FSM.TransitionFrame) -> boolean),
+    options: FSM.GuardOptions?
+): FSM.Mode<ContextValue>
+```
+
+Adds transition guard.
+
+## Guard Semantics
+
+Guards may be:
+
+- reactive stores;
+- callback predicates.
+
+False guards block transitions.
+
+Guard failures route through `ErrorHandler`.
+
+---
+
+# `mode:TaskGroup`
+
+```luau
+mode:TaskGroup(): Task.TaskGroup
+```
+
+Returns the mode-owned task group.
+
+---
+
+# `mode:Tag`
+
+```luau
+mode:Tag(label: string): FSM.Mode<ContextValue>
+```
+
+Attaches metadata label.
+
+---
+
+# `mode:IsActive`
+
+```luau
+mode:IsActive(): boolean
+```
+
+Returns whether the mode is active.
+
+---
+
+# `mode:IsDestroyed`
+
+```luau
+mode:IsDestroyed(): boolean
+```
+
+Returns whether the mode is destroyed.
+
+---
+
+# `mode:Destroy`
+
+```luau
+mode:Destroy(): ()
+```
+
+Destroys the mode.
+
+Destroying an active mode exits it first.
+
+---
+
+# Transition APIs
+
+# `fsm:Start`
+
+```luau
+fsm:Start(name: string): ()
+```
+
+Starts the FSM in the specified mode.
+
+May only be called once.
+
+---
+
+# `fsm:Switch`
+
+```luau
+fsm:Switch(
+    name: string,
+    options: FSM.SwitchOptions?
+): ()
+```
+
+Transitions to another mode.
+
+## Behavior
+
+Transitions:
+
+1. validate guards;
+2. compute exit path;
+3. execute exits;
+4. execute enters;
+5. update active path;
+6. fire transition signals.
+
+---
+
+# `fsm:CanSwitch`
+
+```luau
+fsm:CanSwitch(name: string): boolean
+```
+
+Returns whether transition is currently allowed.
+
+---
+
+# `fsm:Current`
+
+```luau
+fsm:Current(): string
+```
+
+Returns current active leaf mode.
+
+---
+
+# `fsm:IsActive`
+
+```luau
+fsm:IsActive(name: string): boolean
+```
+
+Returns whether a mode is currently active.
+
+---
+
+# `fsm:InMode`
+
+```luau
+fsm:InMode(name: string): boolean
+```
+
+Alias for `IsActive`.
+
+---
+
+# `fsm:Path`
+
+```luau
+fsm:Path(): { string }
+```
+
+Returns current active hierarchical path.
+
+---
+
+# History APIs
+
+# `fsm:History`
+
+```luau
+fsm:History(parentName: string): string?
+```
+
+Returns remembered child history for parent mode.
+
+---
+
+# `fsm:SwitchToHistory`
+
+```luau
+fsm:SwitchToHistory(
+    parentName: string,
+    options: FSM.SwitchOptions?
+): ()
+```
+
+Transitions to remembered child history.
+
+---
+
+# `fsm:ClearHistory`
+
+```luau
+fsm:ClearHistory(parentName: string?): ()
+```
+
+Clears transition history.
+
+---
+
+# Snapshot APIs
+
+# `fsm:Snapshot`
+
+```luau
+fsm:Snapshot(options: unknown?): FSM.Snapshot
+```
+
+Captures current FSM state.
+
+Includes:
+
+- active path;
+- transition history.
+
+---
+
+# `fsm:Restore`
+
+```luau
+fsm:Restore(
+    snapshot: FSM.Snapshot,
+    options: FSM.SwitchOptions?
+): ()
+```
+
+Restores FSM state from snapshot.
+
+---
+
+# Reactive APIs
+
+# `fsm:OnTransition`
+
+```luau
+fsm:OnTransition(
+    callback: (FSM.TransitionEvent) -> ()
+): Connection.Connection
+```
+
+Subscribes to transition events.
+
+---
+
+# `fsm:WaitForTransition`
+
+```luau
+fsm:WaitForTransition(): FSM.TransitionEvent
+```
+
+Yields until next transition occurs.
+
+---
+
+# `fsm:IsActiveStore`
+
+```luau
+fsm:IsActiveStore(
+    name: string
+): Store.ReadableStore<boolean>
+```
+
+Returns reactive activity store for a mode.
+
+---
+
+# `fsm.ActiveStore`
+
+```luau
+fsm.ActiveStore
+```
+
+Reactive store of current active leaf mode.
+
+---
+
+# `fsm.TransitionSignal`
+
+```luau
+fsm.TransitionSignal
+```
+
+Reactive transition signal.
+
+---
+
+# Policy APIs
+
+# `fsm:Policy`
+
+```luau
+fsm:Policy(
+    policy: FSM.PartialPolicy
+): FSM.FSM<ContextValue>
+```
+
+Applies policy updates.
+
+Returns self for chaining.
+
+---
+
+# Lifecycle APIs
+
+# `fsm:IsStarted`
+
+```luau
+fsm:IsStarted(): boolean
+```
+
+Returns whether FSM has started.
+
+---
+
+# `fsm:IsDestroyed`
+
+```luau
+fsm:IsDestroyed(): boolean
+```
+
+Returns whether FSM has been destroyed.
+
+---
+
+# `fsm:Destroy`
+
+```luau
+fsm:Destroy(): ()
+```
+
+Destroys the FSM.
+
+## Behavior
+
+Destroying an FSM:
+
+1. exits active modes;
+2. cancels mode task groups;
+3. disconnects signals;
+4. destroys contexts;
+5. clears guards;
+6. clears history;
+7. destroys owned resources.
+
+Destruction is idempotent.
+
+---
+
+# Transition Semantics
+
+This is one of the most important FSM behaviors.
+
+# Hierarchical Exit Ordering
+
+Transitions compute the divergence point between:
+
+- current path;
+- target path.
+
+Only necessary exits and enters occur.
+
+---
+
+# LeafFirst
+
+```luau
+FSM.ExitOrdering.LeafFirst
+```
+
+Deepest child exits first.
+
+Typical hierarchical behavior.
+
+---
+
+# ParentFirst
+
+```luau
+FSM.ExitOrdering.ParentFirst
+```
+
+Parents exit before descendants.
+
+Useful for some teardown systems.
+
+---
+
+# Transition Deferral
+
+Conflicting transitions may:
+
+- queue;
+- drop.
+
+depending on policy.
+
+---
+
+# Single Switch Per Frame
+
+When enabled:
+
+```luau
+SingleSwitchPerFrame = true
+```
+
+only one transition may occur per frame.
+
+This prevents recursive transition storms.
+
+---
+
+# Task Cancellation Semantics
+
+When:
+
+```luau
+CancelTasksOnExit = true
+```
+
+mode-owned tasks cancel automatically on exit.
+
+This is extremely important for async correctness.
+
+---
+
+# Runtime Error Semantics
+
+# Usage Errors
+
+Usage errors raise immediately.
+
+Examples:
+
+- unknown mode;
+- duplicate mode;
+- invalid policy;
+- invalid transition target;
+- destroyed FSM usage.
+
+---
+
+# Runtime Failures
+
+Lifecycle callback failures route through `ErrorHandler`.
+
+This includes:
+
+- enter callbacks;
+- exit callbacks;
+- update callbacks;
+- guards;
+- tracers.
+
+One failing callback does not corrupt transition state.
+
+---
+
+# Tracing
+
+Tracing is optional and global.
+
+Trace events include:
+
+- event kind;
+- source mode;
+- target mode;
+- metadata tag.
+
+Tracer failures route through `ErrorHandler`.
+
+---
+
+# Gotchas
+
+# Modes Are Hierarchical
+
+Transitions may affect multiple modes simultaneously.
+
+---
+
+# Enter/Exit Order Matters
+
+Nested modes may rely on deterministic ordering.
+
+Choose policy intentionally.
+
+---
+
+# Guards Should Be Pure
+
+Guards should not mutate FSM state.
+
+---
+
+# Async Tasks Must Be Owned
+
+Prefer mode-owned task groups instead of unmanaged async work.
+
+---
+
+# Destroying FSM Cancels Mode Resources
+
+Do not keep stale references to destroyed mode-owned resources.
+
+---
+
+# Best Practices
+
+# Prefer Declarative Builders
+
+Good:
+
+```luau
+fsm:Mode("Combat", function(mode)
+    mode:OnEnter(...)
+    mode:OnExit(...)
 end)
-playing:OnExit(function(ctx, frame)
-    print("exiting playing, score:", score:Get())
+```
+
+Avoid scattered imperative registration.
+
+---
+
+# Prefer Hierarchical Modes
+
+Good hierarchy:
+
+```text
+Gameplay
+├─ Combat
+├─ Inventory
+└─ Dialogue
+```
+
+Avoid flat giant state lists.
+
+---
+
+# Use Guards For Admission Logic
+
+Good:
+
+```luau
+mode:Guard("Combat", staminaStore)
+```
+
+Avoid manual transition checks everywhere.
+
+---
+
+# Use Context For Scoped Dependencies
+
+Modes should provide dependencies locally when possible.
+
+---
+
+# Use Task Groups For Async Lifecycle Ownership
+
+Mode-owned async work should cancel automatically on exit.
+
+---
+
+# Full Example: Basic FSM
+
+```luau
+local machine = FSM.New({})
+
+machine:Mode("Idle", function(mode)
+    mode:OnEnter(function()
+        print("entered idle")
+    end)
 end)
 
--- Auto-switch to gameover when health hits zero.
-local isDead = Store.Derive(function() return health:Get() <= 0 end, { health })
-playing:Guard("gameover", isDead, { Reason = "Death" })
+machine:Mode("Combat", function(mode)
+    mode:OnEnter(function()
+        print("entered combat")
+    end)
+end)
 
--- Attached rule: score on kill.
-local killRule = Rule.New("ScoreOnKill")
-    :On(onEnemyKilled)
-    :Run(function(ctx, payload, frame)
-        score:Update(function(n) return n + (payload.Points or 10) end)
-        if score:Get() >= 100 then
-            game:Switch("gameover", { Reason = "ScoreLimit" })
+machine:Start("Idle")
+machine:Switch("Combat")
+```
+
+---
+
+# Full Example: Hierarchical Modes
+
+```text
+Gameplay
+├─ Exploration
+└─ Combat
+    ├─ Melee
+    └─ Ranged
+```
+
+Transitions only enter/exit affected branches.
+
+---
+
+# Full Example: Guarded Transition
+
+```luau
+combatMode:Guard("Inventory", function(context)
+    return not context:Get("InDanger")
+end)
+```
+
+---
+
+# Full Example: Reactive Activity
+
+```luau
+local combatActive = machine:IsActiveStore("Combat")
+
+combatActive:Subscribe(function(active)
+    print(active)
+end)
+```
+
+---
+
+# Full Example: Mode-Owned Tasks
+
+```luau
+mode:OnEnter(function(context)
+    local taskGroup = mode:TaskGroup()
+
+    taskGroup:Spawn(function()
+        while true do
+            task.wait(1)
         end
     end)
-    :Policy({ Concurrency = Rule.Concurrency.Merge })
-
-playing:Add(killRule)
-
-local gameover = game:Mode("gameover")
-gameover:OnEnter(function(ctx, frame)
-    print("game over! reason:", frame.Reason, "score:", score:Get())
 end)
--- Return to idle after 3 seconds.
-gameover:Guard("idle", Store.Value(false))  -- replaced by Timer below
-gameover:OnEnter(function(ctx, frame)
-    return Task.Delay(3, function()
-        game:Switch("idle")
-    end)
-end)
-
--- ── Start ─────────────────────────────────────────────────────────────────────
-
-game:Start("idle")
-
--- ── React to mode changes ─────────────────────────────────────────────────────
-
-game.ActiveStore:Subscribe(function(mode)
-    print("→ mode:", mode)
-end, { Immediate = false })
-
--- ── Drive the game ─────────────────────────────────────────────────────────────
-
-game:Switch("loading")           -- triggers 2-second async load
--- (after load) game auto-switches to "playing"
-onEnemyKilled:Fire({ Points = 60 })
-onEnemyKilled:Fire({ Points = 50 }) -- score hits 110 → gameover
-
--- ── Cleanup ───────────────────────────────────────────────────────────────────
-
-game:Destroy()
 ```
+
+The task cancels automatically on exit.
+
+---
+
+# Full Example: Snapshot/Restore
+
+```luau
+local snapshot = machine:Snapshot()
+
+machine:Restore(snapshot)
+```
+
+---
+
+# Summary
+
+Use `FSM` whenever systems need deterministic hierarchical state orchestration.
+
+Use:
+
+- modes for lifecycle ownership;
+- guards for admission control;
+- contexts for scoped dependency injection;
+- task groups for async ownership;
+- stores/signals for reactive observation;
+- snapshots/history for restoration flows.
+
+The result is a declarative hierarchical state-machine infrastructure integrated with the entire Kernel architecture.
