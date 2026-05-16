@@ -170,7 +170,7 @@ function getValidatedDisconnectCallback(untrustedDisconnectCallback: unknown?): 
 end
 
 function raiseConnectionUsageError(message: string): never
-	error(message, 3)
+	return ErrorHandler.RaiseUsageError(message)
 end
 
 

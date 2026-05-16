@@ -2,6 +2,7 @@
 
 local Connection = require(script.Parent.Parent.Connection)
 local Context = require(script.Parent.Parent.Context)
+local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
 local Rule = require(script.Parent.Parent.Rule)
 local Signal = require(script.Parent.Parent.Signal)
 local Store = require(script.Parent.Parent.Store)
@@ -57,12 +58,15 @@ export type FSMTraceEvent = {
 	To: string?,
 }
 
+export type ExitOrdering = "LeafFirst" | "ParentFirst"
+export type Deferral = "Queue" | "Drop"
+
 export type Policy = {
 	SingleSwitchPerFrame: boolean,
 	CancelTasksOnExit: boolean,
-	ExitOrdering: string,
-	Deferral: string,
-	ErrorPolicy: string?,
+	ExitOrdering: ExitOrdering,
+	Deferral: Deferral,
+	ErrorPolicy: ErrorHandler.Policy?,
 	Trace: boolean,
 	Tag: string?,
 }
@@ -70,9 +74,9 @@ export type Policy = {
 export type PartialPolicy = {
 	SingleSwitchPerFrame: boolean?,
 	CancelTasksOnExit: boolean?,
-	ExitOrdering: string?,
-	Deferral: string?,
-	ErrorPolicy: string?,
+	ExitOrdering: ExitOrdering?,
+	Deferral: Deferral?,
+	ErrorPolicy: ErrorHandler.Policy?,
 	Trace: boolean?,
 	Tag: string?,
 }
@@ -122,6 +126,16 @@ export type Mode<Ctx> = {
 }
 
 
+export type ExitOrderingSet = {
+	LeafFirst: "LeafFirst",
+	ParentFirst: "ParentFirst",
+}
+
+export type DeferralSet = {
+	Queue: "Queue",
+	Drop: "Drop",
+}
+
 export type FSMModuleType = {
 	New: <Ctx>(ctx: Context.Context<Ctx> | { [any]: any }, opts: PartialPolicy?) -> FSM<Ctx>,
 	IsFSM: (value: unknown) -> boolean,
@@ -129,14 +143,8 @@ export type FSMModuleType = {
 	DefaultPolicy: () -> Policy,
 	ValidatePolicy: (policy: PartialPolicy) -> (boolean, string?),
 	SetTracer: (fn: ((FSMTraceEvent) -> ())?) -> (),
-	ExitOrdering: {
-		LeafFirst: "LeafFirst",
-		ParentFirst: "ParentFirst",
-	},
-	Deferral: {
-		Queue: "Queue",
-		Drop: "Drop",
-	},
+	ExitOrdering: ExitOrderingSet,
+	Deferral: DeferralSet,
 }
 
 return table.freeze({})

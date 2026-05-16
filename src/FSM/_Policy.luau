@@ -1,5 +1,6 @@
 --!strict
 
+local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
 local Types = require(script.Parent._Types)
 
 local Policy = {}
@@ -14,15 +15,21 @@ local KNOWN_FSM_POLICY_KEYS: { [string]: boolean } = {
 	Tag = true,
 }
 
+local leafFirstExitOrdering: "LeafFirst" = "LeafFirst"
+local parentFirstExitOrdering: "ParentFirst" = "ParentFirst"
+
+local queueDeferral: "Queue" = "Queue"
+local dropDeferral: "Drop" = "Drop"
+
 Policy.ExitOrdering = table.freeze({
-	LeafFirst = "LeafFirst" :: "LeafFirst",
-	ParentFirst = "ParentFirst" :: "ParentFirst",
-})
+	LeafFirst = leafFirstExitOrdering,
+	ParentFirst = parentFirstExitOrdering,
+}) :: { LeafFirst: "LeafFirst", ParentFirst: "ParentFirst" }
 
 Policy.Deferral = table.freeze({
-	Queue = "Queue" :: "Queue",
-	Drop = "Drop" :: "Drop",
-})
+	Queue = queueDeferral,
+	Drop = dropDeferral,
+}) :: { Queue: "Queue", Drop: "Drop" }
 
 function Policy.MakeDefaultPolicy(): Types.Policy
 	return {
@@ -80,10 +87,10 @@ function Policy.ValidatePolicy(policy: Types.PartialPolicy): (boolean, string?)
 	local errorPolicy = policy.ErrorPolicy
 
 	if errorPolicy ~= nil
-		and errorPolicy ~= "Throw"
-		and errorPolicy ~= "Warn"
-		and errorPolicy ~= "Swallow"
-		and errorPolicy ~= "Collect"
+		and errorPolicy ~= ErrorHandler.Policy.Throw
+		and errorPolicy ~= ErrorHandler.Policy.Warn
+		and errorPolicy ~= ErrorHandler.Policy.Swallow
+		and errorPolicy ~= ErrorHandler.Policy.Collect
 	then
 		return false, "ErrorPolicy must be 'Throw', 'Warn', 'Swallow', or 'Collect'"
 	end
@@ -104,4 +111,3 @@ function Policy.ValidatePolicy(policy: Types.PartialPolicy): (boolean, string?)
 end
 
 return table.freeze(Policy)
-

@@ -1,5 +1,6 @@
 --!strict
 
+local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
 local Records = require(script.Parent._Records)
 local Types = require(script.Parent._Types)
 
@@ -51,14 +52,14 @@ end
 
 function Validation.GetValidatedRootValues(untrustedValues: unknown): ContextValues
 	if typeof(untrustedValues) ~= "table" then
-		error("Context.Root: values must be a table", 3)
+		return ErrorHandler.RaiseUsageError("Context.Root: values must be a table")
 	end
 
 	local values = untrustedValues :: ContextValues
 
 	for key in values do
 		if not Validation.ValueIsValidContextLookupKey(key) then
-			error("Context.Root: key must be a ContextKey or non-empty string", 3)
+			return ErrorHandler.RaiseUsageError("Context.Root: key must be a ContextKey or non-empty string")
 		end
 	end
 
@@ -67,14 +68,14 @@ end
 
 function Validation.GetValidatedProvidedValues(untrustedValues: unknown, usageErrorPrefix: string): ContextValues
 	if typeof(untrustedValues) ~= "table" then
-		error(`{usageErrorPrefix}: values must be a table`, 3)
+		return ErrorHandler.RaiseUsageError(`{usageErrorPrefix}: values must be a table`)
 	end
 
 	local values = untrustedValues :: ContextValues
 
 	for key in values do
 		if not Validation.ValueIsValidContextLookupKey(key) then
-			error(`{usageErrorPrefix}: key must be a ContextKey or non-empty string`, 3)
+			return ErrorHandler.RaiseUsageError(`{usageErrorPrefix}: key must be a ContextKey or non-empty string`)
 		end
 	end
 
@@ -86,7 +87,7 @@ function Validation.GetValidatedLookupKey(untrustedKey: unknown, usageErrorPrefi
 		return untrustedKey
 	end
 
-	error(`{usageErrorPrefix}: key must be a ContextKey or non-empty string`, 3)
+	return ErrorHandler.RaiseUsageError(`{usageErrorPrefix}: key must be a ContextKey or non-empty string`)
 end
 
 function Validation.GetValidatedLookupKeyOrNil(untrustedKey: unknown): unknown?
@@ -102,7 +103,7 @@ function Validation.GetValidatedKeyName(untrustedName: unknown): string
 		return untrustedName :: string
 	end
 
-	error("Context.Key: name must be a non-empty string", 3)
+	return ErrorHandler.RaiseUsageError("Context.Key: name must be a non-empty string")
 end
 
 function Validation.GetValidatedDestroyCallback(untrustedCallback: unknown, usageErrorMessage: string): DestroyCallback
@@ -110,7 +111,7 @@ function Validation.GetValidatedDestroyCallback(untrustedCallback: unknown, usag
 		return untrustedCallback :: DestroyCallback
 	end
 
-	error(usageErrorMessage, 3)
+	return ErrorHandler.RaiseUsageError(usageErrorMessage)
 end
 
 function Validation.GetValidatedOptionalDestroyCallback(
@@ -126,14 +127,14 @@ end
 
 function Validation.GetValidatedVisibleKeyList(untrustedKeys: unknown): { unknown }
 	if not Validation.ValueIsSequentialArray(untrustedKeys) then
-		error("Context.View: keys must be an array", 3)
+		return ErrorHandler.RaiseUsageError("Context.View: keys must be an array")
 	end
 
 	local keys = untrustedKeys :: { unknown }
 
 	for _, key in keys do
 		if not Validation.ValueIsValidContextLookupKey(key) then
-			error("Context.View: key must be a ContextKey or non-empty string", 3)
+			return ErrorHandler.RaiseUsageError("Context.View: key must be a ContextKey or non-empty string")
 		end
 	end
 
@@ -142,4 +143,3 @@ end
 
 
 return table.freeze(Validation)
-

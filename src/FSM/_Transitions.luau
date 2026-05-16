@@ -1,9 +1,5 @@
 --!strict
 
--- FSM runtime owns the single authoritative implementation of the public FSM API.
--- The parent ModuleScript exports type aliases and returns this runtime table.
--- No public API is duplicated in facade adapters.
-
 local Connection = require(script.Parent.Parent.Connection)
 local Context = require(script.Parent.Parent.Context)
 local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
@@ -32,12 +28,15 @@ type FSMModuleType = Types.FSMModuleType
 
 -- ── Internal records ──────────────────────────────────────────────────────────
 
+type ExitOrdering = "LeafFirst" | "ParentFirst"
+type Deferral = "Queue" | "Drop"
+
 type PolicyRecord = {
 	SingleSwitchPerFrame: boolean,
 	CancelTasksOnExit: boolean,
-	ExitOrdering: string,
-	Deferral: string,
-	ErrorPolicy: string?,
+	ExitOrdering: ExitOrdering,
+	Deferral: Deferral,
+	ErrorPolicy: ErrorHandler.Policy?,
 	Trace: boolean,
 	Tag: string?,
 }
@@ -105,12 +104,12 @@ local modeRecords: { [any]: ModeRecord } = setmetatable({}, { __mode = "k" }) ::
 
 -- ── Tracer ────────────────────────────────────────────────────────────────────
 
-local _tracer: ((FSMTraceEvent) -> ())? = nil
+local activeTracer: ((FSMTraceEvent) -> ())? = nil
 
-local function emitTrace(event: string, fsmRec: FSMRecord, extra: { [string]: any }?)
-	if _tracer == nil then return end
-	local fn = _tracer :: (FSMTraceEvent) -> ()
-	local payload: { [string]: any } = { Event = event, Tag = fsmRec.Policy.Tag }
+local function emitTrace(event: string, fsmRecord: FSMRecord, extra: { [string]: any }?)
+	if activeTracer == nil then return end
+	local fn = activeTracer :: (FSMTraceEvent) -> ()
+	local payload: { [string]: any } = { Event = event, Tag = fsmRecord.Policy.Tag }
 	if extra then
 		for k, v in extra do payload[k] = v end
 	end
@@ -135,7 +134,7 @@ local fsmMeta = {
 		return fsmMethods[key]
 	end,
 	__newindex = function(_, k: string)
-		error("FSM: '" .. k .. "' is read-only", 2)
+		ErrorHandler.RaiseUsageError(`FSM: '{k}' is read-only`)
 	end,
 }
 
@@ -143,7 +142,7 @@ local modeMeta = {
 	__metatable = "FSMMode",
 	__index = modeMethods,
 	__newindex = function(_, k: string)
-		error("Mode: '" .. k .. "' is read-only", 2)
+		ErrorHandler.RaiseUsageError(`Mode: '{k}' is read-only`)
 	end,
 }
 
@@ -154,23 +153,23 @@ local validateFSMPolicy = PolicyHelpers.ValidatePolicy
 
 -- ── Mode parent / path helpers ────────────────────────────────────────────────
 
-local function getModeParentName(fsmRec: FSMRecord, modeRec: ModeRecord): string?
-	if modeRec.ParentHandle ~= nil then
-		local parentRec = modeRecords[modeRec.ParentHandle]
+local function getModeParentName(fsmRecord: FSMRecord, modeRecord: ModeRecord): string?
+	if modeRecord.ParentHandle ~= nil then
+		local parentRec = modeRecords[modeRecord.ParentHandle]
 		return if parentRec ~= nil then parentRec.RegistryName else nil
 	end
-	local name = modeRec.RegistryName
+	local name = modeRecord.RegistryName
 	local dotPos = string.find(name, "%.[^%.]*$")
 	if dotPos ~= nil then
 		local possibleParent = string.sub(name, 1, dotPos - 1)
-		if fsmRec.Modes[possibleParent] ~= nil then
+		if fsmRecord.Modes[possibleParent] ~= nil then
 			return possibleParent
 		end
 	end
 	return nil
 end
 
-local function computePath(fsmRec: FSMRecord, modeName: string): { string }
+local function computePath(fsmRecord: FSMRecord, modeName: string): { string }
 	local path: { string } = {}
 	local current: string? = modeName
 	local visited: { [string]: boolean } = {}
@@ -178,11 +177,11 @@ local function computePath(fsmRec: FSMRecord, modeName: string): { string }
 		if visited[current] then break end
 		visited[current] = true
 		table.insert(path, 1, current)
-		local modeHandle = fsmRec.Modes[current]
+		local modeHandle = fsmRecord.Modes[current]
 		if modeHandle == nil then break end
-		local modeRec = modeRecords[modeHandle]
-		if modeRec == nil then break end
-		current = getModeParentName(fsmRec, modeRec)
+		local modeRecord = modeRecords[modeHandle]
+		if modeRecord == nil then break end
+		current = getModeParentName(fsmRecord, modeRecord)
 	end
 	return path
 end
@@ -216,28 +215,28 @@ end
 
 -- ── IsActiveStore helpers ─────────────────────────────────────────────────────
 
-local function getOrCreateIsActiveStore(fsmRec: FSMRecord, name: string): any
-	local entry = fsmRec._isActiveStores[name]
+local function getOrCreateIsActiveStore(fsmRecord: FSMRecord, name: string): any
+	local entry = fsmRecord._isActiveStores[name]
 	if entry ~= nil then
 		return entry.readonly
 	end
 	local isActive = false
-	for _, m in fsmRec.ActivePath do
+	for _, m in fsmRecord.ActivePath do
 		if m == name then isActive = true break end
 	end
 	local writable = Store.Value(isActive)
 	local readonly = Store.Readonly(writable)
-	fsmRec._isActiveStores[name] = { writable = writable, readonly = readonly }
+	fsmRecord._isActiveStores[name] = { writable = writable, readonly = readonly }
 	return readonly
 end
 
-local function updateIsActiveStores(fsmRec: FSMRecord, fromPath: { string }, toPath: { string })
+local function updateIsActiveStores(fsmRecord: FSMRecord, fromPath: { string }, toPath: { string })
 	local fromSet: { [string]: boolean } = {}
 	for _, m in fromPath do fromSet[m] = true end
 	local toSet: { [string]: boolean } = {}
 	for _, m in toPath do toSet[m] = true end
 
-	for name, entry in fsmRec._isActiveStores do
+	for name, entry in fsmRecord._isActiveStores do
 		local wasActive = fromSet[name] == true
 		local isActive = toSet[name] == true
 		if wasActive ~= isActive then
@@ -248,41 +247,41 @@ end
 
 -- ── Error policy helper ───────────────────────────────────────────────────────
 
-local function handleFSMError(fsmRec: FSMRecord, phase: string, err: any)
-	local ep = fsmRec.Policy.ErrorPolicy
-	if ep == nil or ep == "Warn" or ep == "Collect" then
-		ErrorHandler.Report({ Module = "FSM", Phase = phase, Error = err })
-	elseif ep == "Throw" then
-		error(err, 0)
+local function handleFSMError(fsmRecord: FSMRecord, phase: string, err: unknown): ()
+	local errorPolicy = fsmRecord.Policy.ErrorPolicy
+	local errorInfo: ErrorHandler.ErrorInfo = { Module = "FSM", Phase = phase, Error = err }
+	if errorPolicy ~= nil then
+		ErrorHandler.ReportWithPolicy(errorInfo, errorPolicy)
+	else
+		ErrorHandler.Report(errorInfo)
 	end
-	-- Swallow: ignore
 end
 
 -- ── Mode exit ─────────────────────────────────────────────────────────────────
 
-local function exitMode(fsmRec: FSMRecord, modeHandle: any, frame: TransitionFrame)
-	local modeRec = modeRecords[modeHandle]
-	if modeRec == nil or modeRec.ActiveCtx == nil then return end
+local function exitMode(fsmRecord: FSMRecord, modeHandle: any, frame: TransitionFrame)
+	local modeRecord = modeRecords[modeHandle]
+	if modeRecord == nil or modeRecord.ActiveCtx == nil then return end
 
-	local ctx = modeRec.ActiveCtx
+	local ctx = modeRecord.ActiveCtx
 
 	-- 1. Disconnect update connections
-	for _, conn in modeRec.UpdateConns do
+	for _, conn in modeRecord.UpdateConns do
 		conn:Disconnect()
 	end
-	table.clear(modeRec.UpdateConns)
+	table.clear(modeRecord.UpdateConns)
 
 	-- 2. Disconnect guard watchers
-	for _, conn in modeRec.GuardConns do
+	for _, conn in modeRecord.GuardConns do
 		conn:Disconnect()
 	end
-	table.clear(modeRec.GuardConns)
+	table.clear(modeRecord.GuardConns)
 
 	-- 3. Run OnExit callbacks
-	for _, fn in modeRec.OnExitFns do
+	for _, fn in modeRecord.OnExitFns do
 		local ok, result = pcall(fn, ctx, frame)
 		if not ok then
-			handleFSMError(fsmRec, "Exit", result)
+			handleFSMError(fsmRecord, "Exit", result)
 		else
 			if type(result) == "function" then
 				ErrorHandler.Protect(result :: () -> (), "FSM", "ExitDisposer")
@@ -293,47 +292,47 @@ local function exitMode(fsmRec: FSMRecord, modeHandle: any, frame: TransitionFra
 	end
 
 	-- 4. Run active disposers
-	for _, d in modeRec.ActiveDisposers do
+	for _, d in modeRecord.ActiveDisposers do
 		ErrorHandler.Protect(d, "FSM", "ExitDisposer")
 	end
-	table.clear(modeRec.ActiveDisposers)
+	table.clear(modeRecord.ActiveDisposers)
 
 	-- 5. Disable attached rules
-	for _, ruleHandle in modeRec.AttachedRules do
+	for _, ruleHandle in modeRecord.AttachedRules do
 		if Rule.IsRule(ruleHandle) then
 			(ruleHandle :: any):Disable()
 		end
 	end
 
 	-- 6. Cancel task group if CancelTasksOnExit
-	if fsmRec.Policy.CancelTasksOnExit and modeRec.TaskGroupHandle ~= nil then
-		modeRec.TaskGroupHandle:CancelAll(Task.Reason.ModeExit)
+	if fsmRecord.Policy.CancelTasksOnExit and modeRecord.TaskGroupHandle ~= nil then
+		modeRecord.TaskGroupHandle:CancelAll(Task.Reason.ModeExit)
 	end
 
 	-- 7. Destroy mode context layer
 	if Context.IsContext(ctx) then
 		ctx:Destroy()
 	end
-	modeRec.ActiveCtx = nil
-	modeRec.ActiveStartedAt = nil
+	modeRecord.ActiveCtx = nil
+	modeRecord.ActiveStartedAt = nil
 end
 
 -- ── Mode enter ────────────────────────────────────────────────────────────────
 
-local function enterMode(fsmHandle: any, fsmRec: FSMRecord, modeHandle: any, frame: TransitionFrame)
-	local modeRec = modeRecords[modeHandle]
-	if modeRec == nil or modeRec.Destroyed then return end
+local function enterMode(fsmHandle: any, fsmRecord: FSMRecord, modeHandle: any, frame: TransitionFrame)
+	local modeRecord = modeRecords[modeHandle]
+	if modeRecord == nil or modeRecord.Destroyed then return end
 
 	local startedAt = Scheduler.Now()
-	modeRec.ActiveStartedAt = startedAt
+	modeRecord.ActiveStartedAt = startedAt
 
 	-- 1. Create mode context layer from providers
 	local providerValues: { [any]: any } = {}
 	local providerCleanups: { () -> () } = {}
 
-	for _, provider in modeRec.Providers do
+	for _, provider in modeRecord.Providers do
 		if type(provider) == "function" then
-			local ok, values, cleanup = pcall(provider, fsmRec.CtxHandle, frame)
+			local ok, values, cleanup = pcall(provider, fsmRecord.CtxHandle, frame)
 			if ok then
 				if type(values) == "table" then
 					for k, v in values do
@@ -344,7 +343,7 @@ local function enterMode(fsmHandle: any, fsmRec: FSMRecord, modeHandle: any, fra
 					table.insert(providerCleanups, cleanup :: () -> ())
 				end
 			else
-				handleFSMError(fsmRec, "Provide", values)
+				handleFSMError(fsmRecord, "Provide", values)
 			end
 		elseif type(provider) == "table" then
 			for k, v in provider do
@@ -353,74 +352,74 @@ local function enterMode(fsmHandle: any, fsmRec: FSMRecord, modeHandle: any, fra
 		end
 	end
 
-	local modeCtx = fsmRec.CtxHandle:Layer(providerValues, if #providerCleanups > 0 then function()
+	local modeCtx = fsmRecord.CtxHandle:Layer(providerValues, if #providerCleanups > 0 then function()
 		for _, c in providerCleanups do
 			ErrorHandler.Protect(c, "FSM", "ProvideCleanup")
 		end
 	end else nil)
-	modeRec.ActiveCtx = modeCtx
+	modeRecord.ActiveCtx = modeCtx
 
 	-- 2. Run OnEnter callbacks + 3. collect disposers + 4. add Task returns
-	for _, fn in modeRec.OnEnterFns do
+	for _, fn in modeRecord.OnEnterFns do
 		local ok, result = pcall(fn, modeCtx, frame)
 		if not ok then
-			handleFSMError(fsmRec, "Enter", result)
+			handleFSMError(fsmRecord, "Enter", result)
 		else
 			if type(result) == "function" then
-				table.insert(modeRec.ActiveDisposers, result :: () -> ())
+				table.insert(modeRecord.ActiveDisposers, result :: () -> ())
 			elseif Task.IsTask(result) then
-				if modeRec.TaskGroupHandle == nil then
-					modeRec.TaskGroupHandle = Task.Group()
+				if modeRecord.TaskGroupHandle == nil then
+					modeRecord.TaskGroupHandle = Task.Group()
 				end
-				(modeRec.TaskGroupHandle :: any):Add(result)
+				(modeRecord.TaskGroupHandle :: any):Add(result)
 			end
 		end
 	end
 
 	-- Factory resources
-	for _, factory in modeRec.AddedFactories do
+	for _, factory in modeRecord.AddedFactories do
 		local ok, result = ErrorHandler.Protect(function() return factory(modeCtx, frame) end, "FSM", "Factory")
 		if ok then
 			if type(result) == "function" then
-				table.insert(modeRec.ActiveDisposers, result :: () -> ())
+				table.insert(modeRecord.ActiveDisposers, result :: () -> ())
 			elseif Task.IsTask(result) then
-				if modeRec.TaskGroupHandle == nil then
-					modeRec.TaskGroupHandle = Task.Group()
+				if modeRecord.TaskGroupHandle == nil then
+					modeRecord.TaskGroupHandle = Task.Group()
 				end
-				(modeRec.TaskGroupHandle :: any):Add(result)
+				(modeRecord.TaskGroupHandle :: any):Add(result)
 			end
 		end
 	end
 
 	-- 5. Enable attached rules
-	for _, ruleHandle in modeRec.AttachedRules do
+	for _, ruleHandle in modeRecord.AttachedRules do
 		if Rule.IsRule(ruleHandle) then
 			(ruleHandle :: any):Enable(modeCtx)
 		end
 	end
 
 	-- 6. Connect update callbacks
-	for _, updateFn in modeRec.OnUpdateFns do
+	for _, updateFn in modeRecord.OnUpdateFns do
 		local fn = updateFn
-		local updateFrame: UpdateFrame = { Mode = modeRec.RegistryName, StartedAt = startedAt }
+		local updateFrame: UpdateFrame = { Mode = modeRecord.RegistryName, StartedAt = startedAt }
 		local ok, conn = ErrorHandler.Protect(function()
 			return Scheduler.OnStep(function(dt: number)
-				if modeRec.ActiveCtx == nil then return end
+				if modeRecord.ActiveCtx == nil then return end
 				ErrorHandler.Protect(function() fn(modeCtx, dt, updateFrame) end, "FSM", "Update")
 			end)
 		end, "FSM", "Update")
 		if ok then
-			table.insert(modeRec.UpdateConns, conn :: Connection.Connection)
+			table.insert(modeRecord.UpdateConns, conn :: Connection.Connection)
 		end
 	end
 
 	-- 7 & 8. Activate guards + evaluate immediate function guards
 	local fnGuards: { GuardEntry } = {}
-	for _, g in modeRec.Guards do
+	for _, g in modeRecord.Guards do
 		if Store.IsStore(g.GuardValue) then
 			local guardEntry = g
 			local conn = (g.GuardValue :: any):Subscribe(function(value: any)
-				if value == true and modeRec.ActiveCtx ~= nil then
+				if value == true and modeRecord.ActiveCtx ~= nil then
 					local switchOpts: SwitchOptions = {
 						Reason = guardEntry.Reason,
 						Data = guardEntry.Data,
@@ -429,7 +428,7 @@ local function enterMode(fsmHandle: any, fsmRec: FSMRecord, modeHandle: any, fra
 					fsmMethods.Switch(fsmHandle, guardEntry.To, switchOpts)
 				end
 			end, { Immediate = false })
-			table.insert(modeRec.GuardConns, conn)
+			table.insert(modeRecord.GuardConns, conn)
 		else
 			table.insert(fnGuards, g)
 		end
@@ -449,7 +448,7 @@ local function enterMode(fsmHandle: any, fsmRec: FSMRecord, modeHandle: any, fra
 			local guardEntry = g
 			if guardEntry.Defer then
 				Scheduler.Defer(function()
-					if modeRec.ActiveCtx ~= nil then
+					if modeRecord.ActiveCtx ~= nil then
 						fsmMethods.Switch(fsmHandle, guardEntry.To, {
 							Reason = guardEntry.Reason,
 							Data = guardEntry.Data,
@@ -470,29 +469,29 @@ end
 
 -- ── Transition execution ──────────────────────────────────────────────────────
 
-local function drainSwitchQueue(fsmHandle: any, fsmRec: FSMRecord)
-	while #fsmRec.SwitchQueue > 0 and not fsmRec.Destroyed and not fsmRec.Disposing do
-		local req = table.remove(fsmRec.SwitchQueue, 1) :: { name: string, opts: SwitchOptions? }
-		local currentLeaf = fsmRec.ActivePath[#fsmRec.ActivePath] or ""
-		if req.name ~= currentLeaf and fsmRec.Modes[req.name] ~= nil then
+local function drainSwitchQueue(fsmHandle: any, fsmRecord: FSMRecord)
+	while #fsmRecord.SwitchQueue > 0 and not fsmRecord.Destroyed and not fsmRecord.Disposing do
+		local req = table.remove(fsmRecord.SwitchQueue, 1) :: { name: string, opts: SwitchOptions? }
+		local currentLeaf = fsmRecord.ActivePath[#fsmRecord.ActivePath] or ""
+		if req.name ~= currentLeaf and fsmRecord.Modes[req.name] ~= nil then
 			fsmMethods.Switch(fsmHandle, req.name, req.opts)
-			if fsmRec.Transitioning then break end
+			if fsmRecord.Transitioning then break end
 		end
 	end
 end
 
-local function executeTransition(fsmHandle: any, fsmRec: FSMRecord, targetName: string, opts: SwitchOptions?)
-	if fsmRec.Transitioning then
-		if fsmRec.Policy.Deferral == "Queue" then
-			table.insert(fsmRec.SwitchQueue, { name = targetName, opts = opts })
+local function executeTransition(fsmHandle: any, fsmRecord: FSMRecord, targetName: string, opts: SwitchOptions?)
+	if fsmRecord.Transitioning then
+		if fsmRecord.Policy.Deferral == "Queue" then
+			table.insert(fsmRecord.SwitchQueue, { name = targetName, opts = opts })
 		end
 		return
 	end
 
-	fsmRec.Transitioning = true
+	fsmRecord.Transitioning = true
 
-	local fromPath = fsmRec.ActivePath
-	local toPath = computePath(fsmRec, targetName)
+	local fromPath = fsmRecord.ActivePath
+	local toPath = computePath(fsmRecord, targetName)
 	local lcaIdx = findLCA(fromPath, toPath)
 
 	local frame: TransitionFrame = {
@@ -509,7 +508,7 @@ local function executeTransition(fsmHandle: any, fsmRec: FSMRecord, targetName: 
 	for i = #fromPath, lcaIdx + 1, -1 do
 		table.insert(exitModes, fromPath[i])
 	end
-	if fsmRec.Policy.ExitOrdering == "ParentFirst" then
+	if fsmRecord.Policy.ExitOrdering == "ParentFirst" then
 		local rev: { string } = {}
 		for i = #exitModes, 1, -1 do
 			table.insert(rev, exitModes[i])
@@ -519,38 +518,38 @@ local function executeTransition(fsmHandle: any, fsmRec: FSMRecord, targetName: 
 
 	-- Exit modes
 	for _, modeName in exitModes do
-		local modeHandle = fsmRec.Modes[modeName]
+		local modeHandle = fsmRecord.Modes[modeName]
 		if modeHandle ~= nil then
-			exitMode(fsmRec, modeHandle, frame)
+			exitMode(fsmRecord, modeHandle, frame)
 		end
 	end
 
 	-- Update history (for each exited mode, record in its parent)
 	for _, modeName in exitModes do
-		local modeHandle = fsmRec.Modes[modeName]
+		local modeHandle = fsmRecord.Modes[modeName]
 		if modeHandle ~= nil then
-			local modeRec = modeRecords[modeHandle]
-			if modeRec ~= nil then
-				local parentName = getModeParentName(fsmRec, modeRec)
+			local modeRecord = modeRecords[modeHandle]
+			if modeRecord ~= nil then
+				local parentName = getModeParentName(fsmRecord, modeRecord)
 				if parentName ~= nil then
-					fsmRec.HistoryMap[parentName] = modeName
+					fsmRecord.HistoryMap[parentName] = modeName
 				end
 			end
 		end
 	end
 
 	-- Update active path and stores
-	local prevPath = fsmRec.ActivePath
-	fsmRec.ActivePath = toPath
-	fsmRec._activeStoreWritable:Set(targetName)
-	updateIsActiveStores(fsmRec, prevPath, toPath)
+	local prevPath = fsmRecord.ActivePath
+	fsmRecord.ActivePath = toPath
+	fsmRecord._activeStoreWritable:Set(targetName)
+	updateIsActiveStores(fsmRecord, prevPath, toPath)
 
 	-- Enter modes below LCA
 	for i = lcaIdx + 1, #toPath do
 		local modeName = toPath[i]
-		local modeHandle = fsmRec.Modes[modeName]
+		local modeHandle = fsmRecord.Modes[modeName]
 		if modeHandle ~= nil then
-			enterMode(fsmHandle, fsmRec, modeHandle, frame)
+			enterMode(fsmHandle, fsmRecord, modeHandle, frame)
 		end
 	end
 
@@ -561,11 +560,11 @@ local function executeTransition(fsmHandle: any, fsmRec: FSMRecord, targetName: 
 		Reason = frame.Reason,
 		Data = frame.Data,
 	}
-	fsmRec.TransitionSignal:Fire(event)
-	emitTrace("FSM.Transition", fsmRec, { From = frame.From, To = frame.To })
+	fsmRecord.TransitionSignal:Fire(event)
+	emitTrace("FSM.Transition", fsmRecord, { From = frame.From, To = frame.To })
 
-	fsmRec.Transitioning = false
-	drainSwitchQueue(fsmHandle, fsmRec)
+	fsmRecord.Transitioning = false
+	drainSwitchQueue(fsmHandle, fsmRecord)
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
@@ -574,12 +573,12 @@ local FSM = {} :: any
 
 function FSM.New<Ctx>(ctx: Context.Context<Ctx> | { [any]: any }, opts: PartialPolicy?): FSM<Ctx>
 	if ctx == nil or (type(ctx) ~= "table" and not Context.IsContext(ctx)) then
-		error("FSM.New: ctx must be a table or Context", 2)
+		ErrorHandler.RaiseUsageError("FSM.New: ctx must be a table or Context")
 	end
 	if opts ~= nil then
 		local ok, msg = validateFSMPolicy(opts)
 		if not ok then
-			error("FSM.New: " .. (msg :: string), 2)
+			ErrorHandler.RaiseUsageError("FSM.New: " .. (msg :: string))
 		end
 	end
 
@@ -647,9 +646,9 @@ end
 
 function FSM.SetTracer(fn: ((FSMTraceEvent) -> ())?): ()
 	if fn ~= nil and type(fn) ~= "function" then
-		error("FSM.SetTracer: fn must be a function or nil", 2)
+		ErrorHandler.RaiseUsageError("FSM.SetTracer: fn must be a function or nil")
 	end
-	_tracer = fn
+	activeTracer = fn
 end
 
 -- ── FSM instance methods ──────────────────────────────────────────────────────
@@ -657,7 +656,7 @@ end
 function fsmMethods:Context(): any
 	local rec = fsmRecords[self]
 	if rec == nil or rec.Destroyed then
-		error("FSM.Context: FSM is destroyed", 2)
+		ErrorHandler.RaiseUsageError("FSM.Context: FSM is destroyed")
 	end
 	return rec.CtxHandle
 end
@@ -665,18 +664,18 @@ end
 function fsmMethods:Mode(name: string, builder: ((mode: any) -> ())?): any
 	local rec = fsmRecords[self]
 	if rec == nil or rec.Destroyed then
-		error("FSM.Mode: FSM is destroyed", 2)
+		ErrorHandler.RaiseUsageError("FSM.Mode: FSM is destroyed")
 	end
 	if type(name) ~= "string" or #name == 0 then
-		error("FSM.Mode: name must be a non-empty string", 2)
+		ErrorHandler.RaiseUsageError("FSM.Mode: name must be a non-empty string")
 	end
 	if builder ~= nil and type(builder) ~= "function" then
-		error("FSM.Mode: builder must be a function or nil", 2)
+		ErrorHandler.RaiseUsageError("FSM.Mode: builder must be a function or nil")
 	end
 
 	local modeHandle = rec.Modes[name]
 	if modeHandle == nil then
-		local modeRec: ModeRecord = {
+		local modeRecord: ModeRecord = {
 			Destroyed = false,
 			FSMHandle = self,
 			RegistryName = name,
@@ -699,7 +698,7 @@ function fsmMethods:Mode(name: string, builder: ((mode: any) -> ())?): any
 			ActiveStartedAt = nil,
 		}
 		modeHandle = setmetatable({}, modeMeta)
-		modeRecords[modeHandle] = modeRec
+		modeRecords[modeHandle] = modeRecord
 		rec.Modes[name] = modeHandle
 	end
 
@@ -713,7 +712,7 @@ function fsmMethods:HasMode(name: string): boolean
 	local rec = fsmRecords[self]
 	if rec == nil then return false end
 	if type(name) ~= "string" or #name == 0 then
-		error("FSM.HasMode: name must be a non-empty string", 2)
+		ErrorHandler.RaiseUsageError("FSM.HasMode: name must be a non-empty string")
 	end
 	return rec.Modes[name] ~= nil
 end
@@ -722,7 +721,7 @@ function fsmMethods:GetMode(name: string): any
 	local rec = fsmRecords[self]
 	if rec == nil then return nil end
 	if type(name) ~= "string" or #name == 0 then
-		error("FSM.GetMode: name must be a non-empty string", 2)
+		ErrorHandler.RaiseUsageError("FSM.GetMode: name must be a non-empty string")
 	end
 	return rec.Modes[name]
 end
@@ -730,25 +729,23 @@ end
 function fsmMethods:Start(name: string): ()
 	local rec = fsmRecords[self]
 	if rec == nil or rec.Destroyed then
-		error("FSM.Start: FSM is destroyed", 2)
+		ErrorHandler.RaiseUsageError("FSM.Start: FSM is destroyed")
 	end
 	if rec.Started then
-		error("FSM.Start: already started", 2)
+		ErrorHandler.RaiseUsageError("FSM.Start: already started")
 	end
 	if rec.Modes[name] == nil then
-		error("FSM.Start: mode '" .. name .. "' not registered", 2)
+		ErrorHandler.RaiseUsageError("FSM.Start: mode '" .. name .. "' not registered")
 	end
 
 	-- Validate all guard targets reference registered modes.
 	for modeName, modeHandle in rec.Modes do
-		local modeRec = modeRecords[modeHandle]
-		if modeRec ~= nil then
-			for _, guardEntry in modeRec.Guards do
+		local modeRecord = modeRecords[modeHandle]
+		if modeRecord ~= nil then
+			for _, guardEntry in modeRecord.Guards do
 				if rec.Modes[guardEntry.To] == nil then
-					error(
-						"FSM.Start: guard in mode '" .. modeName
-							.. "' targets unregistered mode '" .. guardEntry.To .. "'",
-						2
+					ErrorHandler.RaiseUsageError(
+						`FSM.Start: guard in mode '{modeName}' targets unregistered mode '{guardEntry.To}'`
 					)
 				end
 			end
@@ -794,16 +791,16 @@ end
 function fsmMethods:Switch(name: string, opts: SwitchOptions?): ()
 	local rec = fsmRecords[self]
 	if rec == nil or rec.Destroyed then
-		error("FSM.Switch: FSM is destroyed", 2)
+		ErrorHandler.RaiseUsageError("FSM.Switch: FSM is destroyed")
 	end
 	if not rec.Started then
-		error("FSM.Switch: FSM has not started", 2)
+		ErrorHandler.RaiseUsageError("FSM.Switch: FSM has not started")
 	end
 	if rec.Modes[name] == nil then
-		error("FSM.Switch: mode '" .. name .. "' not registered", 2)
+		ErrorHandler.RaiseUsageError("FSM.Switch: mode '" .. name .. "' not registered")
 	end
 	if opts ~= nil and type(opts) ~= "table" then
-		error("FSM.Switch: opts must be a table or nil", 2)
+		ErrorHandler.RaiseUsageError("FSM.Switch: opts must be a table or nil")
 	end
 
 	local currentLeaf = rec.ActivePath[#rec.ActivePath] or ""
@@ -899,10 +896,10 @@ end
 function fsmMethods:SwitchToHistory(parentName: string, opts: SwitchOptions?): ()
 	local rec = fsmRecords[self]
 	if rec == nil or rec.Destroyed then
-		error("FSM.SwitchToHistory: FSM is destroyed", 2)
+		ErrorHandler.RaiseUsageError("FSM.SwitchToHistory: FSM is destroyed")
 	end
 	if not rec.Started then
-		error("FSM.SwitchToHistory: FSM has not started", 2)
+		ErrorHandler.RaiseUsageError("FSM.SwitchToHistory: FSM has not started")
 	end
 	local target = rec.HistoryMap[parentName]
 	if target == nil then return end
@@ -933,10 +930,10 @@ end
 function fsmMethods:Restore(snapshot: Snapshot, opts: SwitchOptions?): ()
 	local rec = fsmRecords[self]
 	if rec == nil or rec.Destroyed then
-		error("FSM.Restore: FSM is destroyed", 2)
+		ErrorHandler.RaiseUsageError("FSM.Restore: FSM is destroyed")
 	end
 	if not rec.Started then
-		error("FSM.Restore: FSM has not started", 2)
+		ErrorHandler.RaiseUsageError("FSM.Restore: FSM has not started")
 	end
 	local leaf = snapshot.ActivePath[#snapshot.ActivePath]
 	if leaf == nil then return end
@@ -955,7 +952,7 @@ end
 function fsmMethods:OnTransition(fn: (event: TransitionEvent) -> ()): Connection.Connection
 	local rec = fsmRecords[self]
 	if rec == nil then
-		error("FSM.OnTransition: invalid FSM handle", 2)
+		ErrorHandler.RaiseUsageError("FSM.OnTransition: invalid FSM handle")
 	end
 	return rec.TransitionSignal:Connect(fn)
 end
@@ -963,13 +960,13 @@ end
 function fsmMethods:WaitForTransition(): TransitionEvent
 	local rec = fsmRecords[self]
 	if rec == nil or rec.Destroyed then
-		error("FSM.WaitForTransition: FSM destroyed", 2)
+		ErrorHandler.RaiseUsageError("FSM.WaitForTransition: FSM destroyed")
 	end
 	local ok, result = pcall(function()
 		return rec.TransitionSignal:Wait()
 	end)
 	if not ok then
-		error("FSM.WaitForTransition: FSM destroyed", 2)
+		ErrorHandler.RaiseUsageError("FSM.WaitForTransition: FSM destroyed")
 	end
 	return result :: TransitionEvent
 end
@@ -977,14 +974,14 @@ end
 function fsmMethods:Policy(opts: PartialPolicy): any
 	local rec = fsmRecords[self]
 	if rec == nil or rec.Destroyed then
-		error("FSM.Policy: FSM is destroyed", 2)
+		ErrorHandler.RaiseUsageError("FSM.Policy: FSM is destroyed")
 	end
 	if rec.Started then
-		error("FSM.Policy: cannot change policy after start", 2)
+		ErrorHandler.RaiseUsageError("FSM.Policy: cannot change policy after start")
 	end
 	local ok, msg = validateFSMPolicy(opts)
 	if not ok then
-		error("FSM.Policy: " .. (msg :: string), 2)
+		ErrorHandler.RaiseUsageError("FSM.Policy: " .. (msg :: string))
 	end
 	for k, v in opts :: any do
 		(rec.Policy :: any)[k] = v
@@ -1007,10 +1004,10 @@ end
 function fsmMethods:IsActiveStore(name: string): Store.ReadableStore<boolean>
 	local rec = fsmRecords[self]
 	if rec == nil then
-		error("FSM.IsActiveStore: invalid FSM handle", 2)
+		ErrorHandler.RaiseUsageError("FSM.IsActiveStore: invalid FSM handle")
 	end
 	if type(name) ~= "string" or #name == 0 then
-		error("FSM.IsActiveStore: name must be a non-empty string", 2)
+		ErrorHandler.RaiseUsageError("FSM.IsActiveStore: name must be a non-empty string")
 	end
 	return getOrCreateIsActiveStore(rec, name) :: Store.ReadableStore<boolean>
 end
@@ -1048,11 +1045,11 @@ function fsmMethods:Destroy(): ()
 
 	-- Destroy modes
 	for _, modeHandle in rec.Modes do
-		local modeRec = modeRecords[modeHandle]
-		if modeRec ~= nil then
-			modeRec.Destroyed = true
-			if modeRec.TaskGroupHandle ~= nil then
-				modeRec.TaskGroupHandle:Destroy(Task.Reason.Shutdown)
+		local modeRecord = modeRecords[modeHandle]
+		if modeRecord ~= nil then
+			modeRecord.Destroyed = true
+			if modeRecord.TaskGroupHandle ~= nil then
+				modeRecord.TaskGroupHandle:Destroy(Task.Reason.Shutdown)
 			end
 		end
 	end
@@ -1075,7 +1072,7 @@ end
 function modeMethods:Name(): string
 	local rec = modeRecords[self]
 	if rec == nil then
-		error("Mode.Name: invalid mode handle", 2)
+		ErrorHandler.RaiseUsageError("Mode.Name: invalid mode handle")
 	end
 	return rec.RegistryName
 end
@@ -1089,10 +1086,10 @@ end
 function modeMethods:OnEnter(fn: any): any
 	local rec = modeRecords[self]
 	if rec == nil or rec.Destroyed then
-		error("Mode.OnEnter: mode is destroyed", 2)
+		ErrorHandler.RaiseUsageError("Mode.OnEnter: mode is destroyed")
 	end
 	if type(fn) ~= "function" then
-		error("Mode.OnEnter: fn must be a function", 2)
+		ErrorHandler.RaiseUsageError("Mode.OnEnter: fn must be a function")
 	end
 	table.insert(rec.OnEnterFns, fn)
 	return self
@@ -1101,10 +1098,10 @@ end
 function modeMethods:OnExit(fn: any): any
 	local rec = modeRecords[self]
 	if rec == nil or rec.Destroyed then
-		error("Mode.OnExit: mode is destroyed", 2)
+		ErrorHandler.RaiseUsageError("Mode.OnExit: mode is destroyed")
 	end
 	if type(fn) ~= "function" then
-		error("Mode.OnExit: fn must be a function", 2)
+		ErrorHandler.RaiseUsageError("Mode.OnExit: fn must be a function")
 	end
 	table.insert(rec.OnExitFns, fn)
 	return self
@@ -1113,10 +1110,10 @@ end
 function modeMethods:OnUpdate(fn: any): any
 	local rec = modeRecords[self]
 	if rec == nil or rec.Destroyed then
-		error("Mode.OnUpdate: mode is destroyed", 2)
+		ErrorHandler.RaiseUsageError("Mode.OnUpdate: mode is destroyed")
 	end
 	if type(fn) ~= "function" then
-		error("Mode.OnUpdate: fn must be a function", 2)
+		ErrorHandler.RaiseUsageError("Mode.OnUpdate: fn must be a function")
 	end
 	table.insert(rec.OnUpdateFns, fn)
 	return self
@@ -1125,12 +1122,12 @@ end
 function modeMethods:Add(resource: any): any
 	local rec = modeRecords[self]
 	if rec == nil or rec.Destroyed then
-		error("Mode.Add: mode is destroyed", 2)
+		ErrorHandler.RaiseUsageError("Mode.Add: mode is destroyed")
 	end
 
 	if Rule.IsRule(resource) then
 		if rec.AttachedRuleSet[resource] then
-			error("Mode.Add: duplicate rule", 2)
+			ErrorHandler.RaiseUsageError("Mode.Add: duplicate rule")
 		end
 		rec.AttachedRuleSet[resource] = true
 		table.insert(rec.AttachedRules, resource)
@@ -1146,18 +1143,18 @@ function modeMethods:Add(resource: any): any
 	elseif FSM.IsMode(resource) then
 		local childRec = modeRecords[resource]
 		if childRec == nil then
-			error("Mode.Add: invalid mode handle", 2)
+			ErrorHandler.RaiseUsageError("Mode.Add: invalid mode handle")
 		end
-		local fsmRec = fsmRecords[rec.FSMHandle]
+		local fsmRecord = fsmRecords[rec.FSMHandle]
 		local childFSMRec = fsmRecords[childRec.FSMHandle]
-		if fsmRec ~= childFSMRec then
-			error("Mode.Add: child mode must belong to the same FSM", 2)
+		if fsmRecord ~= childFSMRec then
+			ErrorHandler.RaiseUsageError("Mode.Add: child mode must belong to the same FSM")
 		end
 		if childRec.ParentHandle ~= nil then
-			error("Mode.Add: mode already has a parent (re-parenting is not allowed)", 2)
+			ErrorHandler.RaiseUsageError("Mode.Add: mode already has a parent (re-parenting is not allowed)")
 		end
 		if hasCycle(self, resource) then
-			error("Mode.Add: cycle detected in parent hierarchy", 2)
+			ErrorHandler.RaiseUsageError("Mode.Add: cycle detected in parent hierarchy")
 		end
 		childRec.ParentHandle = self
 	elseif type(resource) == "function" then
@@ -1185,7 +1182,7 @@ function modeMethods:Add(resource: any): any
 			end
 		end
 	else
-		error("Mode.Add: expected Rule, Task, Mode, or function", 2)
+		ErrorHandler.RaiseUsageError("Mode.Add: expected Rule, Task, Mode, or function")
 	end
 
 	return self
@@ -1194,10 +1191,10 @@ end
 function modeMethods:Provide(providerOrValues: any): any
 	local rec = modeRecords[self]
 	if rec == nil or rec.Destroyed then
-		error("Mode.Provide: mode is destroyed", 2)
+		ErrorHandler.RaiseUsageError("Mode.Provide: mode is destroyed")
 	end
 	if type(providerOrValues) ~= "function" and type(providerOrValues) ~= "table" then
-		error("Mode.Provide: providerOrValues must be a function or table", 2)
+		ErrorHandler.RaiseUsageError("Mode.Provide: providerOrValues must be a function or table")
 	end
 	table.insert(rec.Providers, providerOrValues)
 	return self
@@ -1206,13 +1203,13 @@ end
 function modeMethods:Guard(to: string, guard: any, opts: GuardOptions?): any
 	local rec = modeRecords[self]
 	if rec == nil or rec.Destroyed then
-		error("Mode.Guard: mode is destroyed", 2)
+		ErrorHandler.RaiseUsageError("Mode.Guard: mode is destroyed")
 	end
 	if type(to) ~= "string" or #to == 0 then
-		error("Mode.Guard: to must be a non-empty string", 2)
+		ErrorHandler.RaiseUsageError("Mode.Guard: to must be a non-empty string")
 	end
 	if not Store.IsStore(guard) and type(guard) ~= "function" then
-		error("Mode.Guard: guard must be a Store or function", 2)
+		ErrorHandler.RaiseUsageError("Mode.Guard: guard must be a Store or function")
 	end
 	local priority = 0
 	local reason: string? = nil
@@ -1240,7 +1237,7 @@ end
 function modeMethods:TaskGroup(): any
 	local rec = modeRecords[self]
 	if rec == nil then
-		error("Mode.TaskGroup: invalid mode handle", 2)
+		ErrorHandler.RaiseUsageError("Mode.TaskGroup: invalid mode handle")
 	end
 	if rec.TaskGroupHandle == nil then
 		rec.TaskGroupHandle = Task.Group()
@@ -1251,10 +1248,10 @@ end
 function modeMethods:Tag(label: string): any
 	local rec = modeRecords[self]
 	if rec == nil or rec.Destroyed then
-		error("Mode.Tag: mode is destroyed", 2)
+		ErrorHandler.RaiseUsageError("Mode.Tag: mode is destroyed")
 	end
 	if type(label) ~= "string" then
-		error("Mode.Tag: label must be a string", 2)
+		ErrorHandler.RaiseUsageError("Mode.Tag: label must be a string")
 	end
 	rec.Label = label
 	return self
@@ -1263,9 +1260,9 @@ end
 function modeMethods:IsActive(): boolean
 	local rec = modeRecords[self]
 	if rec == nil then return false end
-	local fsmRec = fsmRecords[rec.FSMHandle]
-	if fsmRec == nil then return false end
-	for _, m in fsmRec.ActivePath do
+	local fsmRecord = fsmRecords[rec.FSMHandle]
+	if fsmRecord == nil then return false end
+	for _, m in fsmRecord.ActivePath do
 		if m == rec.RegistryName then return true end
 	end
 	return false
@@ -1282,12 +1279,12 @@ function modeMethods:Destroy(): ()
 	if rec == nil or rec.Destroyed then return end
 
 	if rec.ActiveCtx ~= nil then
-		error("Mode.Destroy: cannot destroy active mode", 2)
+		ErrorHandler.RaiseUsageError("Mode.Destroy: cannot destroy active mode")
 	end
 
-	local fsmRec = fsmRecords[rec.FSMHandle]
-	if fsmRec ~= nil then
-		fsmRec.Modes[rec.RegistryName] = nil
+	local fsmRecord = fsmRecords[rec.FSMHandle]
+	if fsmRecord ~= nil then
+		fsmRecord.Modes[rec.RegistryName] = nil
 	end
 
 	-- Disable/destroy rules
@@ -1314,10 +1311,23 @@ function modeMethods:Destroy(): ()
 	rec.Destroyed = true
 end
 
--- Enum tables: use FSM.ExitOrdering.LeafFirst etc. instead of raw strings in Policy.
-FSM.ExitOrdering = PolicyHelpers.ExitOrdering
-FSM.Deferral = PolicyHelpers.Deferral
+-- ── Enum tables ───────────────────────────────────────────────────────────────
 
+local leafFirstExitOrdering: "LeafFirst" = "LeafFirst"
+local parentFirstExitOrdering: "ParentFirst" = "ParentFirst"
 
-return FSM :: FSMModuleType
+local queueDeferral: "Queue" = "Queue"
+local dropDeferral: "Drop" = "Drop"
+
+FSM.ExitOrdering = table.freeze({
+	LeafFirst = leafFirstExitOrdering,
+	ParentFirst = parentFirstExitOrdering,
+}) :: { LeafFirst: "LeafFirst", ParentFirst: "ParentFirst" }
+
+FSM.Deferral = table.freeze({
+	Queue = queueDeferral,
+	Drop = dropDeferral,
+}) :: { Queue: "Queue", Drop: "Drop" }
+
+return FSM :: Types.FSMModuleType
 

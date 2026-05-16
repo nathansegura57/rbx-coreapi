@@ -1,13 +1,14 @@
 --!strict
 
-local LazyProviders = require(script.Parent._LazyProviders)
+local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
 local Records = require(script.Parent._Records)
 local Types = require(script.Parent._Types)
-local Views = require(script.Parent._Views)
 
 
 type BaseContext<Value> = Types.BaseContext<Value>
 type ContextPrivateState = Types.ContextPrivateState
+type LazyProviderEntry = Types.LazyProviderEntry
+type LazyValueProvider<Value> = Types.LazyValueProvider<Value>
 type LookupResult = Types.LookupResult
 
 
@@ -25,8 +26,8 @@ function Lookup.GetRequiredValueFromContextTree(requestingContextHandle: BaseCon
 		"Context.Require: source context is destroyed"
 	)
 
-	if not Views.ContextPrivateStateCanSeeKey(requestingContextPrivateState, key) then
-		error(`Context.Require: key '{Records.GetReadableKeyName(key)}' is not visible in this view`, 3)
+	if not Records.ContextPrivateStateCanSeeKey(requestingContextPrivateState, key) then
+		return ErrorHandler.RaiseUsageError(`Context.Require: key '{Records.GetReadableKeyName(key)}' is not visible in this view`)
 	end
 
 	local lookupResult = Lookup.FindValueInContextTree(requestingContextHandle, requestingContextHandle, key)
@@ -35,7 +36,7 @@ function Lookup.GetRequiredValueFromContextTree(requestingContextHandle: BaseCon
 		return lookupResult.Value
 	end
 
-	error(`Context.Require: missing key '{Records.GetReadableKeyName(key)}'`, 3)
+	return ErrorHandler.RaiseUsageError(`Context.Require: missing key '{Records.GetReadableKeyName(key)}'`)
 end
 
 function Lookup.GetOptionalValueFromContextTree(requestingContextHandle: BaseContext<unknown>, key: unknown): unknown?
@@ -49,7 +50,7 @@ function Lookup.GetOptionalValueFromContextTree(requestingContextHandle: BaseCon
 		"Context.Maybe: source context is destroyed"
 	)
 
-	if not Views.ContextPrivateStateCanSeeKey(requestingContextPrivateState, key) then
+	if not Records.ContextPrivateStateCanSeeKey(requestingContextPrivateState, key) then
 		return nil
 	end
 
@@ -73,7 +74,7 @@ function Lookup.ContextTreeContainsKeyWithoutResolvingLazyProviders(
 
 	Records.GetLiveSourceContextPrivateStateOrRaiseUsageError(contextPrivateState, "Context.Has: source context is destroyed")
 
-	if not Views.ContextPrivateStateCanSeeKey(contextPrivateState, key) then
+	if not Records.ContextPrivateStateCanSeeKey(contextPrivateState, key) then
 		return false
 	end
 
@@ -133,7 +134,7 @@ function Lookup.FindValueInViewSource(
 	viewPrivateState: ContextPrivateState,
 	key: unknown
 ): LookupResult
-	if not Views.ContextPrivateStateCanSeeKey(viewPrivateState, key) then
+	if not Records.ContextPrivateStateCanSeeKey(viewPrivateState, key) then
 		return Lookup.CreateMissingLookupResult()
 	end
 
@@ -160,12 +161,12 @@ function Lookup.FindValueInStoredOrLazyEntries(
 	local lazyProviderEntry = currentContextPrivateState.LazyProviderByKey[key]
 
 	if lazyProviderEntry ~= nil then
-		return Lookup.CreateFoundLookupResult(LazyProviders.ResolveLazyProviderValue(
+		return Lookup.CreateFoundLookupResult(Lookup.ResolveLazyProviderValue(
 			requestingContextHandle,
 			currentContextPrivateState,
 			key,
 			lazyProviderEntry
-			))
+		))
 	end
 
 	return Lookup.CreateMissingLookupResult()
@@ -207,5 +208,49 @@ function Lookup.CreateFoundLookupResult(value: unknown): LookupResult
 end
 
 
-return table.freeze(Lookup)
+-- ── Lazy provider resolution ──────────────────────────────────────────────────
 
+function Lookup.ResolveLazyProviderValue(
+	requestingContextHandle: BaseContext<unknown>,
+	currentContextPrivateState: ContextPrivateState,
+	key: unknown,
+	lazyProviderEntry: LazyProviderEntry
+): unknown
+	if lazyProviderEntry.IsCurrentlyResolving then
+		return ErrorHandler.RaiseUsageError(`Context.Require: lazy provider cycle for key '{Records.GetReadableKeyName(key)}'`)
+	end
+
+	lazyProviderEntry.IsCurrentlyResolving = true
+
+	local resolvedValue = Lookup.RunLazyProviderThroughErrorHandler(
+		requestingContextHandle,
+		key,
+		lazyProviderEntry.Provider
+	)
+
+	lazyProviderEntry.IsCurrentlyResolving = false
+
+	currentContextPrivateState.StoredValueByKey[key] = Records.CreateStoredValueEntry(resolvedValue)
+	currentContextPrivateState.LazyProviderByKey[key] = nil
+
+	return resolvedValue
+end
+
+function Lookup.RunLazyProviderThroughErrorHandler(
+	requestingContextHandle: BaseContext<unknown>,
+	key: unknown,
+	lazyProvider: LazyValueProvider<unknown>
+): unknown
+	local providerSucceeded, resolvedValue = ErrorHandler.Protect(function()
+		return lazyProvider(requestingContextHandle)
+	end, "Context", "LazyProvider", Records.GetReadableKeyName(key))
+
+	if providerSucceeded then
+		return resolvedValue
+	end
+
+	return ErrorHandler.RaiseUsageError(`Context.Require: lazy provider failed for key '{Records.GetReadableKeyName(key)}'`)
+end
+
+
+return table.freeze(Lookup)

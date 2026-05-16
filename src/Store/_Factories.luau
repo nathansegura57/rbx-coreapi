@@ -48,7 +48,7 @@ function Factories.Derive<Value>(
 	options: DeriveOptions<Value>?
 ): ReadableStore<Value>
 	if type(computeValue) ~= "function" then
-		error("Store.Derive: compute must be a function", 2)
+		ErrorHandler.RaiseUsageError("Store.Derive: compute must be a function")
 	end
 
 	local dependencyHandles = Validation.EnsureDependencyArrayIsValid(
@@ -63,13 +63,13 @@ function Factories.Derive<Value>(
 
 	Validation.EnsureNameCanBeRegistered("Store.Derive", valueOptions.Name, valueOptions.ReplaceName)
 
-	local initialComputeSucceeded, initialValue, initialComputeError = ErrorHandler.Protect(function(): Value
-		return computeValue()
-	end, "Store", "Derive", "InitialCompute")
+	local initialComputeOk, initialValueOrError = pcall(computeValue)
 
-	if not initialComputeSucceeded then
-		error(`Store.Derive: initial compute failed: {tostring(initialComputeError)}`, 2)
+	if not initialComputeOk then
+		ErrorHandler.RaiseUsageError(`Store.Derive: initial compute failed: {tostring(initialValueOrError)}`)
 	end
+
+	local initialValue = initialValueOrError :: Value
 
 	local storeHandle = Records.CreateStoreHandle("derived")
 	local storeRecord = Records.GetRequiredStoreRecord(storeHandle, "Store.Derive: failed to create store")
@@ -101,11 +101,11 @@ function Factories.Select<InputValue, SelectedValue>(
 	Validation.EnsureValueIsLiveStore(sourceStore, "Store.Select: source must be a live Store")
 
 	if type(selectValue) ~= "function" then
-		error("Store.Select: picker must be a function", 2)
+		ErrorHandler.RaiseUsageError("Store.Select: picker must be a function")
 	end
 
 	if valuesAreEqual ~= nil and type(valuesAreEqual) ~= "function" then
-		error("Store.Select: equals must be a function or nil", 2)
+		ErrorHandler.RaiseUsageError("Store.Select: equals must be a function or nil")
 	end
 
 	local capturedSourceStore = sourceStore
@@ -120,7 +120,7 @@ end
 
 function Factories.Combine(values: { [any]: ReadableStore<any> }): ReadableStore<{ any }>
 	if type(values) ~= "table" then
-		error("Store.Combine: input must be a table", 2)
+		ErrorHandler.RaiseUsageError("Store.Combine: input must be a table")
 	end
 
 	local inputValues = values :: { [any]: any }
@@ -131,7 +131,7 @@ function Factories.Combine(values: { [any]: ReadableStore<any> }): ReadableStore
 	end
 
 	if entryCount == 0 then
-		error("Store.Combine: input must not be empty", 2)
+		ErrorHandler.RaiseUsageError("Store.Combine: input must not be empty")
 	end
 
 	local arrayLength = #(inputValues :: { any })
@@ -209,7 +209,7 @@ function Factories.Match(sourceStore: ReadableStore<any>, cases: { [any]: Readab
 	Validation.EnsureValueIsLiveStore(sourceStore, "Store.Match: source must be a live Store")
 
 	if type(cases) ~= "table" then
-		error("Store.Match: cases must be a table", 2)
+		ErrorHandler.RaiseUsageError("Store.Match: cases must be a table")
 	end
 
 	local caseStoresByKey = {}
@@ -225,7 +225,7 @@ function Factories.Match(sourceStore: ReadableStore<any>, cases: { [any]: Readab
 	local initialCaseStore = caseStoresByKey[initialKey] or caseStoresByKey["_"]
 
 	if initialCaseStore == nil then
-		error("Store.Match: initial case not found and no default '_' case", 2)
+		ErrorHandler.RaiseUsageError("Store.Match: initial case not found and no default '_' case")
 	end
 
 	local lastResolvedValue: any = nil
@@ -247,7 +247,7 @@ function Factories.Match(sourceStore: ReadableStore<any>, cases: { [any]: Readab
 				return lastResolvedValue
 			end
 
-			error("Store.Match: no case found", 0)
+			ErrorHandler.RaiseUsageError("Store.Match: no case found")
 		end
 
 		lastResolvedValue = Records.GetRequiredStoreRecord(caseStore, "Store.Match: case store was destroyed").Value
@@ -273,5 +273,5 @@ function Factories.Readonly<Value>(store: ReadableStore<Value>): ReadableStore<V
 	return storeHandle :: ReadableStore<Value>
 end
 
-return Factories
+return table.freeze(Factories)
 

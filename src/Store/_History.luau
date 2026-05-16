@@ -3,6 +3,7 @@
 local History = {}
 
 local Connection = require(script.Parent.Parent.Connection)
+local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
 local Factories = require(script.Parent._Factories)
 local InstanceMethods = require(script.Parent._InstanceMethods)
 local Records = require(script.Parent._Records)
@@ -17,7 +18,7 @@ function History.Create<Value>(store: WritableStore<Value>, limit: number?): His
 	local storeRecord = Validation.EnsureValueIsLiveStore(store, "Store.History: store must be a writable live Store")
 
 	if storeRecord.Kind ~= "value" then
-		error("Store.History: store must be a writable live Store", 2)
+		ErrorHandler.RaiseUsageError("Store.History: store must be a writable live Store")
 	end
 
 	local undoLimit = if limit == nil then 100 else Validation.EnsurePositiveInteger(

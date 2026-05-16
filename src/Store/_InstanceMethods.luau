@@ -22,11 +22,11 @@ function InstanceMethods:Set(value: any): ()
 	local storeRecord = Records.GetRequiredStoreRecord(self, "Store.Set: store is destroyed")
 
 	if storeRecord.Kind == "readonly" then
-		error("Store.Set: store is read-only", 2)
+		ErrorHandler.RaiseUsageError("Store.Set: store is read-only")
 	end
 
 	if storeRecord.Kind ~= "value" then
-		error("Store.Set: only writable stores support Set", 2)
+		ErrorHandler.RaiseUsageError("Store.Set: only writable stores support Set")
 	end
 
 	local oldValue = storeRecord.Value
@@ -47,7 +47,7 @@ function InstanceMethods:Update(updater: any): ()
 	local storeRecord = Records.GetRequiredStoreRecord(self, "Store.Update: store is destroyed")
 
 	if type(updater) ~= "function" then
-		error("Store.Update: updater must be a function", 2)
+		ErrorHandler.RaiseUsageError("Store.Update: updater must be a function")
 	end
 
 	local updateSucceeded, updatedValue, updateError = ErrorHandler.Protect(function(): any
@@ -55,7 +55,7 @@ function InstanceMethods:Update(updater: any): ()
 	end, "Store", "Update")
 
 	if not updateSucceeded then
-		error(updateError, 0)
+		return
 	end
 
 	InstanceMethods.Set(self, updatedValue)
@@ -65,7 +65,7 @@ function InstanceMethods:Subscribe(listener: any, options: any?): Connection.Con
 	local storeRecord = Records.GetRequiredStoreRecord(self, "Store.Subscribe: store is destroyed")
 
 	if type(listener) ~= "function" then
-		error("Store.Subscribe: listener must be a function", 2)
+		ErrorHandler.RaiseUsageError("Store.Subscribe: listener must be a function")
 	end
 
 	local immediate, deferred = Validation.GetValidatedSubscribeOptions(options)
@@ -117,7 +117,7 @@ function InstanceMethods:Equals(equals: any): any
 	Records.GetRequiredStoreRecord(self, "Store.Equals: store is destroyed")
 
 	if type(equals) ~= "function" then
-		error("Store.Equals: equals must be a function", 2)
+		ErrorHandler.RaiseUsageError("Store.Equals: equals must be a function")
 	end
 
 	local sourceStore = self
@@ -153,7 +153,7 @@ function InstanceMethods:Wait(): (any, any)
 	local storeRecord = Records.GetRequiredStoreRecord(self, "Store.Wait: store destroyed")
 
 	if not coroutine.isyieldable() then
-		error("Store.Wait: must be called from a yieldable coroutine", 2)
+		ErrorHandler.RaiseUsageError("Store.Wait: must be called from a yieldable coroutine")
 	end
 
 	local waitingThread = coroutine.running() :: thread
@@ -164,7 +164,7 @@ function InstanceMethods:Wait(): (any, any)
 	local resumedSuccessfully, newValue, oldValue = coroutine.yield()
 
 	if not resumedSuccessfully then
-		error("Store.Wait: store destroyed", 2)
+		ErrorHandler.RaiseUsageError("Store.Wait: store destroyed")
 	end
 
 	return newValue, oldValue

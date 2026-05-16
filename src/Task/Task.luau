@@ -1,127 +1,128 @@
 --!strict
 
-local Runtime = require(script._Runtime)
-local Constructors = require(script._Constructors)
 local Combinators = require(script._Combinators)
-local Groups = require(script._Groups)
+local Constructors = require(script._Constructors)
+local Records = require(script._Records)
+local Types = require(script._Types)
 
-export type Status = Runtime.Status
-export type CancellationReason = Runtime.CancellationReason
-export type Backoff = Runtime.Backoff
-export type Token = Runtime.Token
-export type Task<T> = Runtime.Task<T>
-export type TaskGroup = Runtime.TaskGroup
-export type TaskOptions = Runtime.TaskOptions
-export type GroupOptions = Runtime.GroupOptions
+export type Status = Types.Status
+export type CancellationReason = Types.CancellationReason
+export type Backoff = Types.Backoff
+export type Token = Types.Token
+export type Task<T> = Types.Task<T>
+export type TaskGroup = Types.TaskGroup
+export type TaskOptions = Types.TaskOptions
+export type GroupOptions = Types.GroupOptions
 export type RetryOptions = Combinators.RetryOptions
 export type SettledResult = Combinators.SettledResult
-export type TraceEvent = Runtime.TraceEvent
+export type TraceEvent = Types.TraceEvent
 
 export type TaskModule = {
-	Status: Runtime.StatusSet,
-	Reason: Runtime.ReasonSet,
-	Backoff: Runtime.BackoffSet,
+	Status: Types.StatusSet,
+	Reason: Types.ReasonSet,
+	Backoff: Types.BackoffSet,
 
-	Start: <T>(taskBody: (Runtime.Token) -> T, options: Runtime.TaskOptions?) -> Runtime.Task<T>,
-	Delay: (seconds: number, delayedCallback: (() -> any)?) -> Runtime.Task<any>,
-	Sleep: (seconds: number, token: Runtime.Token?) -> (boolean, string?),
-	Resolved: <T>(value: T) -> Runtime.Task<T>,
-	Rejected: (errorValue: unknown) -> Runtime.Task<never>,
-	Cancelled: (reason: string?) -> Runtime.Task<never>,
+	Start: <T>(taskBody: (Types.Token) -> T, options: Types.TaskOptions?) -> Types.Task<T>,
+	Delay: (seconds: number, delayedCallback: (() -> any)?) -> Types.Task<any>,
+	Sleep: (seconds: number, token: Types.Token?) -> (boolean, string?),
+	Resolved: <T>(value: T) -> Types.Task<T>,
+	Rejected: (errorValue: unknown) -> Types.Task<never>,
+	Cancelled: (reason: string?) -> Types.Task<never>,
 
-	All: <T>(tasks: { Runtime.Task<T> }) -> Runtime.Task<{ T }>,
-	Race: <T>(tasks: { Runtime.Task<T> }) -> Runtime.Task<T>,
-	Any: <T>(tasks: { Runtime.Task<T> }) -> Runtime.Task<T>,
-	AllSettled: (tasks: { Runtime.Task<any> }) -> Runtime.Task<{ Combinators.SettledResult }>,
-	Timeout: <T>(inner: Runtime.Task<T> | (() -> Runtime.Task<T>), seconds: number, reason: string?) -> Runtime.Task<T>,
-	Retry: <T>(makeTask: (Runtime.Token) -> Runtime.Task<T>, options: Combinators.RetryOptions) -> Runtime.Task<T>,
-	FromRoblox: (robloxSignal: RBXScriptSignal, untilSignal: RBXScriptSignal?) -> Runtime.Task<{ any }>,
+	All: <T>(tasks: { Types.Task<T> }) -> Types.Task<{ T }>,
+	Race: <T>(tasks: { Types.Task<T> }) -> Types.Task<T>,
+	Any: <T>(tasks: { Types.Task<T> }) -> Types.Task<T>,
+	AllSettled: (tasks: { Types.Task<any> }) -> Types.Task<{ Combinators.SettledResult }>,
+	Timeout: <T>(inner: Types.Task<T> | (() -> Types.Task<T>), seconds: number, reason: string?) -> Types.Task<T>,
+	Retry: <T>(makeTask: (Types.Token) -> Types.Task<T>, options: Combinators.RetryOptions) -> Types.Task<T>,
+	FromRoblox: (robloxSignal: RBXScriptSignal, untilSignal: RBXScriptSignal?) -> Types.Task<{ any }>,
 
-	Group: (options: Runtime.GroupOptions?) -> Runtime.TaskGroup,
+	Group: (options: Types.GroupOptions?) -> Types.TaskGroup,
 
 	IsTask: (value: unknown) -> boolean,
 	IsToken: (value: unknown) -> boolean,
 	IsGroup: (value: unknown) -> boolean,
-	SetTracer: (tracer: ((Runtime.TraceEvent) -> ())?) -> (),
+	SetTracer: (tracer: ((Types.TraceEvent) -> ())?) -> (),
 }
 
 local Task = {} :: TaskModule
 
-Task.Status = Runtime.Status
-Task.Reason = Runtime.Reason
-Task.Backoff = Runtime.Backoff
+Task.Status = Records.Status
+Task.Reason = Records.Reason
+Task.Backoff = Records.Backoff
 
-function Task.Start<T>(taskBody: (Runtime.Token) -> T, options: Runtime.TaskOptions?): Runtime.Task<T>
+function Task.Start<T>(taskBody: (Types.Token) -> T, options: Types.TaskOptions?): Types.Task<T>
 	return Constructors.Start(taskBody, options)
 end
 
-function Task.Delay(seconds: number, delayedCallback: (() -> any)?): Runtime.Task<any>
+function Task.Delay(seconds: number, delayedCallback: (() -> any)?): Types.Task<any>
 	return Constructors.Delay(seconds, delayedCallback)
 end
 
-function Task.Sleep(seconds: number, token: Runtime.Token?): (boolean, string?)
+function Task.Sleep(seconds: number, token: Types.Token?): (boolean, string?)
 	return Constructors.Sleep(seconds, token)
 end
 
-function Task.Resolved<T>(value: T): Runtime.Task<T>
+function Task.Resolved<T>(value: T): Types.Task<T>
 	return Constructors.Resolved(value)
 end
 
-function Task.Rejected(errorValue: unknown): Runtime.Task<never>
+function Task.Rejected(errorValue: unknown): Types.Task<never>
 	return Constructors.Rejected(errorValue)
 end
 
-function Task.Cancelled(reason: string?): Runtime.Task<never>
+function Task.Cancelled(reason: string?): Types.Task<never>
 	return Constructors.Cancelled(reason)
 end
 
-function Task.All<T>(tasks: { Runtime.Task<T> }): Runtime.Task<{ T }>
+function Task.All<T>(tasks: { Types.Task<T> }): Types.Task<{ T }>
 	return Combinators.All(tasks)
 end
 
-function Task.Race<T>(tasks: { Runtime.Task<T> }): Runtime.Task<T>
+function Task.Race<T>(tasks: { Types.Task<T> }): Types.Task<T>
 	return Combinators.Race(tasks)
 end
 
-function Task.Any<T>(tasks: { Runtime.Task<T> }): Runtime.Task<T>
+function Task.Any<T>(tasks: { Types.Task<T> }): Types.Task<T>
 	return Combinators.Any(tasks)
 end
 
-function Task.AllSettled(tasks: { Runtime.Task<any> }): Runtime.Task<{ Combinators.SettledResult }>
+function Task.AllSettled(tasks: { Types.Task<any> }): Types.Task<{ Combinators.SettledResult }>
 	return Combinators.AllSettled(tasks)
 end
 
-function Task.Timeout<T>(inner: Runtime.Task<T> | (() -> Runtime.Task<T>), seconds: number, reason: string?): Runtime.Task<T>
+function Task.Timeout<T>(inner: Types.Task<T> | (() -> Types.Task<T>), seconds: number, reason: string?): Types.Task<T>
 	return Combinators.Timeout(inner, seconds, reason)
 end
 
-function Task.Retry<T>(makeTask: (Runtime.Token) -> Runtime.Task<T>, options: Combinators.RetryOptions): Runtime.Task<T>
+function Task.Retry<T>(makeTask: (Types.Token) -> Types.Task<T>, options: Combinators.RetryOptions): Types.Task<T>
 	return Combinators.Retry(makeTask, options)
 end
 
-function Task.FromRoblox(robloxSignal: RBXScriptSignal, untilSignal: RBXScriptSignal?): Runtime.Task<{ any }>
+function Task.FromRoblox(robloxSignal: RBXScriptSignal, untilSignal: RBXScriptSignal?): Types.Task<{ any }>
 	return Combinators.FromRoblox(robloxSignal, untilSignal)
 end
 
-function Task.Group(options: Runtime.GroupOptions?): Runtime.TaskGroup
-	return Groups.Create(options)
+function Task.Group(options: Types.GroupOptions?): Types.TaskGroup
+	local groupName = Records.ValidateGroupOptions(options, "Task.Group")
+	local group = Records.CreateGroupRecord(groupName)
+	return group
 end
 
 function Task.IsTask(value: unknown): boolean
-	return Runtime.ValueIsLiveTask(value)
+	return Records.ValueIsLiveTask(value)
 end
 
 function Task.IsToken(value: unknown): boolean
-	return Runtime.ValueIsLiveToken(value)
+	return Records.ValueIsLiveToken(value)
 end
 
 function Task.IsGroup(value: unknown): boolean
-	return Runtime.ValueIsLiveGroup(value)
+	return Records.ValueIsLiveGroup(value)
 end
 
-function Task.SetTracer(tracer: ((Runtime.TraceEvent) -> ())?): ()
-	Runtime.SetTracer(tracer)
+function Task.SetTracer(tracer: ((Types.TraceEvent) -> ())?): ()
+	Records.SetTracer(tracer)
 end
 
 return table.freeze(Task)
-

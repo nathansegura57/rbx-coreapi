@@ -303,7 +303,7 @@ function getValidatedDelaySeconds(untrustedDelaySeconds: unknown): number
 end
 
 function raiseSchedulerUsageError(message: string): never
-	error(message, 3)
+	return ErrorHandler.RaiseUsageError(message)
 end
 
 

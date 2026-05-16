@@ -1021,6 +1021,90 @@ ErrorHandler.ClearCollected()
 
 ---
 
+## `ErrorHandler.RaiseUsageError`
+
+```luau
+ErrorHandler.RaiseUsageError(message: string): never
+```
+
+Raises a usage error attributed to the first caller outside the CoreAPI kernel.
+
+Use this instead of `error(message, N)` throughout the kernel. This function walks the call stack, skips internal Kernel frames, and raises the error at the first external caller frame — no matter how deep the validation logic is nested.
+
+### Parameters
+
+| Parameter | Type | Required | Description |
+|---|---:|---:|---|
+| `message` | `string` | Yes | Human-readable description of the incorrect usage. |
+
+### Returns
+
+`never`. This function always raises and never returns.
+
+### When to Use
+
+Use `RaiseUsageError` when the caller passed an invalid argument, called a method in an invalid state, or violated an API contract.
+
+Do not use it to report runtime callback failures — use `Report` or `Protect` for those.
+
+### Example
+
+```luau
+function Records.GetTaskRecord(task: Task<any>, message: string): TaskRecord
+    local taskRecord = taskRecords[task]
+    if taskRecord == nil then
+        return ErrorHandler.RaiseUsageError(message)
+    end
+    return taskRecord
+end
+```
+
+---
+
+## `ErrorHandler.ReportWithPolicy`
+
+```luau
+ErrorHandler.ReportWithPolicy(errorInfo: ErrorHandler.ErrorInfo, policy: ErrorHandler.Policy): ()
+```
+
+Routes a structured error report through the global reporter, then applies a **caller-supplied** policy instead of the global active policy.
+
+### Parameters
+
+| Parameter | Type | Required | Description |
+|---|---:|---:|---|
+| `errorInfo` | `ErrorHandler.ErrorInfo` | Yes | Structured description of the failure. |
+| `policy` | `ErrorHandler.Policy` | Yes | Policy to apply for this specific report, overriding the global active policy. |
+
+### Returns
+
+Nothing when the supplied `policy` is `Warn`, `Swallow`, or `Collect`.
+
+When the supplied `policy` is `Throw`, this function raises an error and does not return.
+
+### Behavior
+
+Identical to `Report`, except the active global policy is ignored. The caller-supplied `policy` is applied directly.
+
+This allows modules like `Rule` and `FSM` to carry per-instance `ErrorPolicy` configuration. When a rule or FSM has a local `ErrorPolicy` set, its effect errors are routed through `ReportWithPolicy(errorInfo, instancePolicy)` instead of `Report(errorInfo)`.
+
+When `errorPolicy` is `nil` (no local override), callers should use `Report(errorInfo)` instead to apply the global policy.
+
+### Example: Rule-local Error Policy
+
+```luau
+local function handleEffectError(ruleName: string, err: unknown, errorPolicy: ErrorHandler.Policy?): ()
+    local errorInfo = { Module = "Rule", Phase = "Effect", Name = ruleName, Error = err }
+    if errorPolicy ~= nil then
+        ErrorHandler.ReportWithPolicy(errorInfo, errorPolicy)
+    else
+        ErrorHandler.Report(errorInfo)
+    end
+end
+```
+
+---
+
 ## Recommended Startup Configuration
 
 ### Development

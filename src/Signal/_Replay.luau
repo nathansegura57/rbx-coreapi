@@ -83,7 +83,7 @@ function Replay.defineReplayPolicyMethods(signalMethods: SignalMethods): ()
 		local signalRecord = Records.getLiveSignalRecordOrError(self, "Signal.ReplayCount: signal is destroyed")
 
 		if signalRecord.ReplayPolicy ~= nil then
-			error("Signal: only one replay policy may be applied", 2)
+			ErrorHandler.RaiseUsageError("Signal: only one replay policy may be applied")
 		end
 
 		signalRecord.ReplayPolicy = "Count"
@@ -97,7 +97,7 @@ function Replay.defineReplayPolicyMethods(signalMethods: SignalMethods): ()
 		local signalRecord = Records.getLiveSignalRecordOrError(self, "Signal.ReplayTime: signal is destroyed")
 
 		if signalRecord.ReplayPolicy ~= nil then
-			error("Signal: only one replay policy may be applied", 2)
+			ErrorHandler.RaiseUsageError("Signal: only one replay policy may be applied")
 		end
 
 		signalRecord.ReplayPolicy = "Time"

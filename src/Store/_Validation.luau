@@ -2,6 +2,7 @@
 
 local Validation = {}
 
+local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
 local Records = require(script.Parent._Records)
 local Types = require(script.Parent._Types)
 
@@ -23,7 +24,7 @@ function Validation.GetValidatedValueOptions(callerName: string, options: unknow
 	end
 
 	if type(options) ~= "table" then
-		error(`{callerName}: opts must be a table or nil`, 3)
+		ErrorHandler.RaiseUsageError(`{callerName}: opts must be a table or nil`)
 	end
 
 	local optionTable = options :: { [string]: unknown }
@@ -32,15 +33,15 @@ function Validation.GetValidatedValueOptions(callerName: string, options: unknow
 	local replaceName = optionTable.ReplaceName
 
 	if name ~= nil and (type(name) ~= "string" or #(name :: string) == 0) then
-		error(`{callerName}: Name must be a non-empty string or nil`, 3)
+		ErrorHandler.RaiseUsageError(`{callerName}: Name must be a non-empty string or nil`)
 	end
 
 	if equals ~= nil and type(equals) ~= "function" then
-		error(`{callerName}: Equals must be a function or nil`, 3)
+		ErrorHandler.RaiseUsageError(`{callerName}: Equals must be a function or nil`)
 	end
 
 	if replaceName ~= nil and type(replaceName) ~= "boolean" then
-		error(`{callerName}: ReplaceName must be a boolean or nil`, 3)
+		ErrorHandler.RaiseUsageError(`{callerName}: ReplaceName must be a boolean or nil`)
 	end
 
 	return {
@@ -52,19 +53,19 @@ end
 
 function Validation.EnsureNameCanBeRegistered(callerName: string, name: string?, replaceName: boolean): ()
 	if name ~= nil and Records.NameIsAlreadyRegistered(name) and not replaceName then
-		error(`{callerName}: duplicate store name '{name}'`, 3)
+		ErrorHandler.RaiseUsageError(`{callerName}: duplicate store name '{name}'`)
 	end
 end
 
 function Validation.EnsureValueIsLiveStore(value: unknown, usageErrorMessage: string): StoreRecord
 	if not Records.ValueIsLiveStoreHandle(value) then
-		error(usageErrorMessage, 3)
+		ErrorHandler.RaiseUsageError(usageErrorMessage)
 	end
 
 	local storeRecord = Records.GetStoreRecord(value :: any)
 
 	if storeRecord == nil or storeRecord.Destroyed then
-		error(usageErrorMessage, 3)
+		ErrorHandler.RaiseUsageError(usageErrorMessage)
 	end
 
 	return storeRecord
@@ -76,7 +77,7 @@ function Validation.EnsureDependencyArrayIsValid(
 	invalidDependencyMessage: (number) -> string
 ): { any }
 	if type(dependencies) ~= "table" or #(dependencies :: { any }) == 0 then
-		error(`{callerName}: deps must be a non-empty dense array`, 3)
+		ErrorHandler.RaiseUsageError(`{callerName}: deps must be a non-empty dense array`)
 	end
 
 	local dependencyArray = dependencies :: { any }
@@ -90,7 +91,7 @@ end
 
 function Validation.EnsureStoreArrayIsValid(callerName: string, stores: unknown): { any }
 	if type(stores) ~= "table" or #(stores :: { any }) == 0 then
-		error(`{callerName}: stores must be a non-empty dense array of live Stores`, 3)
+		ErrorHandler.RaiseUsageError(`{callerName}: stores must be a non-empty dense array of live Stores`)
 	end
 
 	local storeArray = stores :: { any }
@@ -108,7 +109,7 @@ function Validation.GetValidatedSubscribeOptions(options: unknown): (boolean, bo
 	end
 
 	if type(options) ~= "table" then
-		error("Store.Subscribe: opts must be a table or nil", 3)
+		ErrorHandler.RaiseUsageError("Store.Subscribe: opts must be a table or nil")
 	end
 
 	local optionTable = options :: { [string]: unknown }
@@ -116,11 +117,11 @@ function Validation.GetValidatedSubscribeOptions(options: unknown): (boolean, bo
 	local deferred = optionTable.Deferred
 
 	if immediate ~= nil and type(immediate) ~= "boolean" then
-		error("Store.Subscribe: Immediate must be a boolean or nil", 3)
+		ErrorHandler.RaiseUsageError("Store.Subscribe: Immediate must be a boolean or nil")
 	end
 
 	if deferred ~= nil and type(deferred) ~= "boolean" then
-		error("Store.Subscribe: Deferred must be a boolean or nil", 3)
+		ErrorHandler.RaiseUsageError("Store.Subscribe: Deferred must be a boolean or nil")
 	end
 
 	return if immediate == nil then true else immediate :: boolean, if deferred == nil then false else deferred :: boolean
@@ -132,13 +133,13 @@ function Validation.GetValidatedRestoreStrictOption(options: unknown): boolean
 	end
 
 	if type(options) ~= "table" then
-		error("Store.Restore: opts must be a table or nil", 3)
+		ErrorHandler.RaiseUsageError("Store.Restore: opts must be a table or nil")
 	end
 
 	local strict = (options :: { [string]: unknown }).Strict
 
 	if strict ~= nil and type(strict) ~= "boolean" then
-		error("Store.Restore: Strict must be a boolean or nil", 3)
+		ErrorHandler.RaiseUsageError("Store.Restore: Strict must be a boolean or nil")
 	end
 
 	return if strict == nil then false else strict :: boolean
@@ -146,11 +147,10 @@ end
 
 function Validation.EnsurePositiveInteger(value: unknown, usageErrorMessage: string): number
 	if type(value) ~= "number" or value < 1 or value ~= math.floor(value) then
-		error(usageErrorMessage, 3)
+		ErrorHandler.RaiseUsageError(usageErrorMessage)
 	end
 
 	return value :: number
 end
 
 return Validation
-

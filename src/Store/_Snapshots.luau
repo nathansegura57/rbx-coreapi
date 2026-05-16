@@ -2,6 +2,7 @@
 
 local Snapshots = {}
 
+local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
 local InstanceMethods = require(script.Parent._InstanceMethods)
 local Records = require(script.Parent._Records)
 local Transactions = require(script.Parent._Transactions)
@@ -31,7 +32,7 @@ end
 
 function Snapshots.Restore(snapshot: Snapshot, options: RestoreOptions?): ()
 	if type(snapshot) ~= "table" then
-		error("Store.Restore: snapshot must be a table", 2)
+		ErrorHandler.RaiseUsageError("Store.Restore: snapshot must be a table")
 	end
 
 	local strict = Validation.GetValidatedRestoreStrictOption(options)
@@ -40,7 +41,7 @@ function Snapshots.Restore(snapshot: Snapshot, options: RestoreOptions?): ()
 		for key, value in snapshot do
 			if type(key) ~= "string" then
 				if strict then
-					error("Store.Restore: snapshot contains unnamed store entry which is not restorable")
+					ErrorHandler.RaiseUsageError("Store.Restore: snapshot contains unnamed store entry which is not restorable")
 				end
 
 				continue
@@ -50,7 +51,7 @@ function Snapshots.Restore(snapshot: Snapshot, options: RestoreOptions?): ()
 
 			if storeHandle == nil then
 				if strict then
-					error(`Store.Restore: unknown store '{key}'`)
+					ErrorHandler.RaiseUsageError(`Store.Restore: unknown store '{key}'`)
 				end
 
 				continue
@@ -60,11 +61,11 @@ function Snapshots.Restore(snapshot: Snapshot, options: RestoreOptions?): ()
 
 			if storeRecord == nil or storeRecord.Destroyed then
 				if strict then
-					error(`Store.Restore: store '{key}' is destroyed`)
+					ErrorHandler.RaiseUsageError(`Store.Restore: store '{key}' is destroyed`)
 				end
 			elseif storeRecord.Kind ~= "value" then
 				if strict then
-					error(`Store.Restore: store '{key}' is not writable`)
+					ErrorHandler.RaiseUsageError(`Store.Restore: store '{key}' is not writable`)
 				end
 			else
 				InstanceMethods.Set(storeHandle, value)

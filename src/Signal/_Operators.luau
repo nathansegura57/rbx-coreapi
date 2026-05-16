@@ -29,13 +29,13 @@ end
 
 function Operators.validateLiveSignalArgument(Signal: SignalModule, signalValue: any, usageErrorMessage: string): ()
 	if not Signal.IsSignal(signalValue) then
-		error(usageErrorMessage, 3)
+		ErrorHandler.RaiseUsageError(usageErrorMessage)
 	end
 
 	local signalRecord = Records.getSignalRecord(signalValue)
 
 	if signalRecord == nil or signalRecord.Destroyed then
-		error(usageErrorMessage, 3)
+		ErrorHandler.RaiseUsageError(usageErrorMessage)
 	end
 end
 
@@ -48,12 +48,12 @@ function Operators.getThrottleOptions(options: any): (boolean, boolean)
 	end
 
 	if type(options) ~= "table" then
-		error("Signal.Throttle: opts must be a table or nil", 3)
+		ErrorHandler.RaiseUsageError("Signal.Throttle: opts must be a table or nil")
 	end
 
 	if options.Leading ~= nil then
 		if type(options.Leading) ~= "boolean" then
-			error("Signal.Throttle: Leading must be a boolean or nil", 3)
+			ErrorHandler.RaiseUsageError("Signal.Throttle: Leading must be a boolean or nil")
 		end
 
 		leading = options.Leading
@@ -61,7 +61,7 @@ function Operators.getThrottleOptions(options: any): (boolean, boolean)
 
 	if options.Trailing ~= nil then
 		if type(options.Trailing) ~= "boolean" then
-			error("Signal.Throttle: Trailing must be a boolean or nil", 3)
+			ErrorHandler.RaiseUsageError("Signal.Throttle: Trailing must be a boolean or nil")
 		end
 
 		trailing = options.Trailing

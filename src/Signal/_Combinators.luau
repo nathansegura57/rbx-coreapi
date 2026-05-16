@@ -1,5 +1,6 @@
 --!strict
 
+local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
 local Scheduler = require(script.Parent.Parent.Scheduler)
 
 local Records = require(script.Parent._Records)
@@ -15,20 +16,20 @@ type SignalModule = Types.SignalModule
 
 function Combinators.ensureDenseArrayOfLiveSignals(Signal: SignalModule, signals: any, usageErrorMessage: string): ()
 	if type(signals) ~= "table" or #signals == 0 then
-		error(usageErrorMessage, 3)
+		ErrorHandler.RaiseUsageError(usageErrorMessage)
 	end
 
 	for signalIndex = 1, #signals do
 		local signal = signals[signalIndex]
 
 		if not Signal.IsSignal(signal) then
-			error(usageErrorMessage, 3)
+			ErrorHandler.RaiseUsageError(usageErrorMessage)
 		end
 
 		local signalRecord = Records.getSignalRecord(signal)
 
 		if signalRecord == nil or signalRecord.Destroyed then
-			error(usageErrorMessage, 3)
+			ErrorHandler.RaiseUsageError(usageErrorMessage)
 		end
 	end
 end
@@ -46,7 +47,7 @@ function Combinators.getValidatedSequenceOptions(options: any): (number, number,
 	end
 
 	if type(options) ~= "table" then
-		error("Signal.Sequence: opts must be a table or nil", 3)
+		ErrorHandler.RaiseUsageError("Signal.Sequence: opts must be a table or nil")
 	end
 
 	if options.MinTimeBetween ~= nil then
@@ -67,7 +68,7 @@ function Combinators.getValidatedSequenceOptions(options: any): (number, number,
 
 	if options.ResetOnMismatch ~= nil then
 		if type(options.ResetOnMismatch) ~= "boolean" then
-			error("Signal.Sequence: ResetOnMismatch must be a boolean or nil", 3)
+			ErrorHandler.RaiseUsageError("Signal.Sequence: ResetOnMismatch must be a boolean or nil")
 		end
 
 		resetOnMismatch = options.ResetOnMismatch
@@ -75,18 +76,18 @@ function Combinators.getValidatedSequenceOptions(options: any): (number, number,
 
 	if options.FireOnMismatch ~= nil then
 		if type(options.FireOnMismatch) ~= "boolean" then
-			error("Signal.Sequence: FireOnMismatch must be a boolean or nil", 3)
+			ErrorHandler.RaiseUsageError("Signal.Sequence: FireOnMismatch must be a boolean or nil")
 		end
 
 		fireOnMismatch = options.FireOnMismatch
 	end
 
 	if maximumTimeBetweenSteps < minimumTimeBetweenSteps then
-		error("Signal.Sequence: MaxTimeBetween must be >= MinTimeBetween", 3)
+		ErrorHandler.RaiseUsageError("Signal.Sequence: MaxTimeBetween must be >= MinTimeBetween")
 	end
 
 	if maximumTotalTime < minimumTotalTime then
-		error("Signal.Sequence: MaxTotalTime must be >= MinTotalTime", 3)
+		ErrorHandler.RaiseUsageError("Signal.Sequence: MaxTotalTime must be >= MinTotalTime")
 	end
 
 	return minimumTimeBetweenSteps, maximumTimeBetweenSteps, minimumTotalTime, maximumTotalTime, resetOnMismatch, fireOnMismatch

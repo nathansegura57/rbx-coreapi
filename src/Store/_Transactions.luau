@@ -7,7 +7,7 @@ local Notifications = require(script.Parent._Notifications)
 
 function Transactions.Batch(block: () -> ()): ()
 	if type(block) ~= "function" then
-		error("Store.Batch: block must be a function", 2)
+		ErrorHandler.RaiseUsageError("Store.Batch: block must be a function")
 	end
 
 	Notifications.EnterBatch()
@@ -22,14 +22,12 @@ function Transactions.Batch(block: () -> ()): ()
 			Phase = "Batch",
 			Error = blockError,
 		})
-
-		error(blockError, 0)
 	end
 end
 
 function Transactions.Transaction(block: () -> ()): ()
 	if type(block) ~= "function" then
-		error("Store.Transaction: block must be a function", 2)
+		ErrorHandler.RaiseUsageError("Store.Transaction: block must be a function")
 	end
 
 	Notifications.EnterTransaction()
@@ -44,10 +42,8 @@ function Transactions.Transaction(block: () -> ()): ()
 			Phase = "Transaction",
 			Error = blockError,
 		})
-
-		error(blockError, 0)
 	end
 end
 
-return Transactions
+return table.freeze(Transactions)
 

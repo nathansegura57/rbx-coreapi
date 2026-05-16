@@ -7,6 +7,17 @@ local NoErrorSentinel = table.freeze({
 local ErrorHandlerModuleSource = debug.info(1, "s") :: string
 local MaximumStackLevelsToInspect = 64
 
+-- Derive the Kernel-wide path prefix so RaiseUsageError can skip any Kernel
+-- module frame, not only ErrorHandler's own frames.
+local KernelRootPrefix: string = (function(): string
+	local lastDotPosition = string.find(ErrorHandlerModuleSource, "%.([^%.]*)$")
+	if lastDotPosition == nil then
+		return ErrorHandlerModuleSource
+	end
+	return string.sub(ErrorHandlerModuleSource, 1, lastDotPosition)
+end)()
+
+
 export type NoErrorSentinel = typeof(NoErrorSentinel)
 export type ReportedError = unknown
 
@@ -40,7 +51,15 @@ export type ErrorHandlerModule = {
 	GetReporter: () -> Reporter?,
 
 	Report: (errorInfo: ErrorInfo) -> (),
-	Protect: <Result>(callback: (() -> Result) | (() -> ()), moduleName: string, phaseName: string, errorName: string?) -> (boolean, Result?, ReportedError?),
+	ReportWithPolicy: (errorInfo: ErrorInfo, policy: Policy) -> (),
+	Protect: <Result>(
+		callback: (() -> Result) | (() -> ()),
+		moduleName: string,
+		phaseName: string,
+		errorName: string?
+	) -> (boolean, Result?, ReportedError?),
+
+	RaiseUsageError: (message: string) -> never,
 
 	TakeCollected: () -> { ErrorInfo },
 	ClearCollected: () -> (),
@@ -49,12 +68,21 @@ export type ErrorHandlerModule = {
 local ErrorHandler = {} :: ErrorHandlerModule
 
 
+-- ── Enum table ────────────────────────────────────────────────────────────────
+
+local throwPolicy: "Throw" = "Throw"
+local warnPolicy: "Warn" = "Warn"
+local swallowPolicy: "Swallow" = "Swallow"
+local collectPolicy: "Collect" = "Collect"
+
 local Policy: PolicySet = table.freeze({
-	Throw = "Throw" :: "Throw",
-	Warn = "Warn" :: "Warn",
-	Swallow = "Swallow" :: "Swallow",
-	Collect = "Collect" :: "Collect",
+	Throw = throwPolicy,
+	Warn = warnPolicy,
+	Swallow = swallowPolicy,
+	Collect = collectPolicy,
 })
+
+-- ── Active state ──────────────────────────────────────────────────────────────
 
 local activePolicy: Policy = Policy.Throw
 local activeReporter: Reporter? = nil
@@ -62,9 +90,13 @@ local collectedErrorInfoList: { ErrorInfo } = {}
 local reporterIsCurrentlyHandlingAnError = false
 
 
+-- ── Public state ──────────────────────────────────────────────────────────────
+
 ErrorHandler.Policy = Policy
 ErrorHandler.NoError = NoErrorSentinel
 
+
+-- ── Policy ────────────────────────────────────────────────────────────────────
 
 function ErrorHandler.SetPolicy(policy: Policy): ()
 	activePolicy = getValidatedPolicy(policy)
@@ -75,6 +107,8 @@ function ErrorHandler.GetPolicy(): Policy
 end
 
 
+-- ── Reporter ──────────────────────────────────────────────────────────────────
+
 function ErrorHandler.SetReporter(reporter: Reporter?): ()
 	activeReporter = getValidatedReporter(reporter)
 end
@@ -84,11 +118,20 @@ function ErrorHandler.GetReporter(): Reporter?
 end
 
 
+-- ── Report and protect ────────────────────────────────────────────────────────
+
 function ErrorHandler.Report(errorInfo: ErrorInfo): ()
 	local validatedErrorInfo = getValidatedErrorInfo(errorInfo)
 
 	callActiveReporterWithoutAllowingRecursiveReporterFailures(validatedErrorInfo)
-	applyActivePolicyToErrorInfo(validatedErrorInfo)
+	applyPolicyToErrorInfo(validatedErrorInfo, activePolicy)
+end
+
+function ErrorHandler.ReportWithPolicy(errorInfo: ErrorInfo, policy: Policy): ()
+	local validatedErrorInfo = getValidatedErrorInfo(errorInfo)
+
+	callActiveReporterWithoutAllowingRecursiveReporterFailures(validatedErrorInfo)
+	applyPolicyToErrorInfo(validatedErrorInfo, policy)
 end
 
 function ErrorHandler.Protect<Result>(
@@ -114,6 +157,32 @@ function ErrorHandler.Protect<Result>(
 end
 
 
+-- ── Usage error raiser ────────────────────────────────────────────────────────
+
+-- Walks the call stack and raises at the first frame that does not belong to
+-- any Kernel module (identified by KernelRootPrefix) and is not a C boundary.
+-- Falls back to level 2 if no user frame is found.
+function ErrorHandler.RaiseUsageError(message: string): never
+	for stackLevel = 2, MaximumStackLevelsToInspect do
+		local frameSource = debug.info(stackLevel, "s")
+
+		if frameSource == nil then
+			break
+		end
+
+		if frameSource ~= "=[C]"
+			and string.sub(frameSource, 1, #KernelRootPrefix) ~= KernelRootPrefix
+		then
+			error(message, stackLevel)
+		end
+	end
+
+	error(message, 2)
+end
+
+
+-- ── Collected errors ──────────────────────────────────────────────────────────
+
 function ErrorHandler.TakeCollected(): { ErrorInfo }
 	local collectedErrorInfoSnapshotList = collectedErrorInfoList
 	collectedErrorInfoList = {}
@@ -125,6 +194,8 @@ function ErrorHandler.ClearCollected(): ()
 	collectedErrorInfoList = {}
 end
 
+
+-- ── Internal: usage error for ErrorHandler's own validation ──────────────────
 
 function raiseErrorHandlerUsageError(message: string): never
 	error(message, getErrorLevelForFirstCallerOutsideErrorHandlerModule())
@@ -149,6 +220,8 @@ function getErrorLevelForFirstCallerOutsideErrorHandlerModule(): number
 	return firstStackLevelOutsideThisHelper
 end
 
+
+-- ── Argument validation ───────────────────────────────────────────────────────
 
 function getValidatedPolicy(untrustedPolicy: unknown): Policy
 	if untrustedPolicy == Policy.Throw then
@@ -274,6 +347,8 @@ function getValidatedReportedError(errorInfoTable: { [string]: unknown }): Repor
 end
 
 
+-- ── Error formatting ──────────────────────────────────────────────────────────
+
 function createErrorInfoSnapshot(errorInfo: ErrorInfo): ErrorInfo
 	return {
 		Module = errorInfo.Module,
@@ -309,11 +384,13 @@ function createReadableErrorMessage(errorInfo: ErrorInfo): string
 end
 
 
+-- ── Reporter invocation ───────────────────────────────────────────────────────
+
 function reporterCallSucceeded(reporter: Reporter, errorInfo: ErrorInfo): (boolean, unknown?)
 	local reporterSucceeded, reporterError = pcall(function()
 		reporter(errorInfo)
 	end)
-	
+
 	return reporterSucceeded, reporterError
 end
 
@@ -329,10 +406,10 @@ function callActiveReporterWithoutAllowingRecursiveReporterFailures(errorInfo: E
 	end
 
 	reporterIsCurrentlyHandlingAnError = true
-	
+
 	local reporterSucceeded, reporterError =
 		reporterCallSucceeded(reporter, createErrorInfoSnapshot(errorInfo))
-	
+
 	reporterIsCurrentlyHandlingAnError = false
 
 	if not reporterSucceeded then
@@ -340,22 +417,22 @@ function callActiveReporterWithoutAllowingRecursiveReporterFailures(errorInfo: E
 	end
 end
 
-function applyActivePolicyToErrorInfo(errorInfo: ErrorInfo): ()
-	if activePolicy == Policy.Throw then
+function applyPolicyToErrorInfo(errorInfo: ErrorInfo, policy: Policy): ()
+	if policy == Policy.Throw then
 		raiseReportedErrorUsingBestAvailableCallerLocation(errorInfo)
 	end
 
-	if activePolicy == Policy.Warn then
+	if policy == Policy.Warn then
 		warn(createReadableErrorMessage(errorInfo))
 		return
 	end
 
-	if activePolicy == Policy.Collect then
+	if policy == Policy.Collect then
 		table.insert(collectedErrorInfoList, createErrorInfoSnapshot(errorInfo))
 		return
 	end
 
-	if activePolicy == Policy.Swallow then
+	if policy == Policy.Swallow then
 		return
 	end
 end
@@ -366,4 +443,3 @@ end
 
 
 return table.freeze(ErrorHandler)
-

@@ -26,7 +26,7 @@ function Records.getLiveSignalRecordOrError(signalHandle: any, usageErrorMessage
 	local signalRecord = signalRecordsByHandle[signalHandle]
 
 	if signalRecord == nil or signalRecord.Destroyed then
-		error(usageErrorMessage, 2)
+		return ErrorHandler.RaiseUsageError(usageErrorMessage)
 	end
 
 	return signalRecord
@@ -49,7 +49,7 @@ function Records.createSignalHandle(signalMethods: SignalMethods, isNeverSignal:
 		end,
 
 		__newindex = function(_self: any, key: string, _value: any): ()
-			error(`Signal: '{tostring(key)}' is read-only`, 2)
+			ErrorHandler.RaiseUsageError(`Signal: '{tostring(key)}' is read-only`)
 		end,
 
 		__metatable = "Signal",

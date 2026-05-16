@@ -1,5 +1,6 @@
 --!strict
 
+local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
 local Types = require(script.Parent._Types)
 
 
@@ -232,7 +233,7 @@ function Records.GetContextPrivateStateOrRaiseUsageError(
 		return contextPrivateState
 	end
 
-	error(usageErrorMessage, 3)
+	return ErrorHandler.RaiseUsageError(usageErrorMessage)
 end
 
 function Records.GetLiveContextPrivateStateOrRaiseUsageError(
@@ -245,7 +246,7 @@ function Records.GetLiveContextPrivateStateOrRaiseUsageError(
 		return contextPrivateState
 	end
 
-	error(usageErrorMessage, 3)
+	return ErrorHandler.RaiseUsageError(usageErrorMessage)
 end
 
 function Records.GetLiveSourceContextPrivateStateOrRaiseUsageError(
@@ -265,6 +266,11 @@ function Records.GetContextPrivateStateWithoutValidation(
 	contextHandle: BaseContext<unknown>
 ): ContextPrivateState?
 	return contextPrivateStateByHandle[contextHandle]
+end
+
+function Records.ContextPrivateStateCanSeeKey(contextPrivateState: ContextPrivateState, key: unknown): boolean
+	local visibleKeySet = contextPrivateState.VisibleKeySet
+	return visibleKeySet == nil or visibleKeySet[key] == true
 end
 
 
@@ -303,11 +309,11 @@ function Records.RejectContextHandlePublicMutation(
 	key: string,
 	_value: unknown
 ): never
-	error(`Context: '{tostring(key)}' is read-only`, 2)
+	ErrorHandler.RaiseUsageError(`Context: '{tostring(key)}' is read-only`)
 end
 
 function Records.RejectContextKeyPublicMutation(_contextKey: ContextKey<unknown>, key: string, _value: unknown): never
-	error(`ContextKey: '{tostring(key)}' is read-only`, 2)
+	ErrorHandler.RaiseUsageError(`ContextKey: '{tostring(key)}' is read-only`)
 end
 
 

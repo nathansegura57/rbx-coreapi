@@ -2,6 +2,7 @@
 
 local Records = {}
 
+local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
 local Types = require(script.Parent._Types)
 
 type StoreKind = Types.StoreKind
@@ -17,7 +18,7 @@ local storeHandleMetatable = {
 	end,
 
 	__newindex = function(_storeHandle: any, key: string, _value: any): ()
-		error(`Store: '{tostring(key)}' is read-only`, 2)
+		ErrorHandler.RaiseUsageError(`Store: '{tostring(key)}' is read-only`)
 	end,
 
 	__metatable = "Store",
@@ -64,7 +65,7 @@ function Records.GetRequiredStoreRecord(storeHandle: any, usageErrorMessage: str
 	local storeRecord = storeRecordsByHandle[storeHandle]
 
 	if storeRecord == nil or storeRecord.Destroyed then
-		error(usageErrorMessage, 3)
+		ErrorHandler.RaiseUsageError(usageErrorMessage)
 	end
 
 	return storeRecord

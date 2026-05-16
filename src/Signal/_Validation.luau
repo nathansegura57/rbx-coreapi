@@ -1,11 +1,13 @@
 --!strict
 
+local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
+
 local Validation = {}
 
 
 function Validation.ensureCallback(untrustedCallback: unknown, usageErrorMessage: string): ()
 	if type(untrustedCallback) ~= "function" then
-		error(usageErrorMessage, 3)
+		return ErrorHandler.RaiseUsageError(usageErrorMessage)
 	end
 end
 
@@ -14,7 +16,7 @@ function Validation.ensureNonNegativeSeconds(untrustedSeconds: unknown, usageErr
 		return untrustedSeconds
 	end
 
-	error(usageErrorMessage, 3)
+	return ErrorHandler.RaiseUsageError(usageErrorMessage)
 end
 
 function Validation.ensurePositiveSeconds(untrustedSeconds: unknown, usageErrorMessage: string): number
@@ -22,7 +24,7 @@ function Validation.ensurePositiveSeconds(untrustedSeconds: unknown, usageErrorM
 		return untrustedSeconds
 	end
 
-	error(usageErrorMessage, 3)
+	return ErrorHandler.RaiseUsageError(usageErrorMessage)
 end
 
 function Validation.ensurePositiveInteger(untrustedNumber: unknown, usageErrorMessage: string): number
@@ -33,7 +35,7 @@ function Validation.ensurePositiveInteger(untrustedNumber: unknown, usageErrorMe
 		return untrustedNumber
 	end
 
-	error(usageErrorMessage, 3)
+	return ErrorHandler.RaiseUsageError(usageErrorMessage)
 end
 
 function Validation.ensureNonNegativeInteger(untrustedNumber: unknown, usageErrorMessage: string): number
@@ -44,9 +46,8 @@ function Validation.ensureNonNegativeInteger(untrustedNumber: unknown, usageErro
 		return untrustedNumber
 	end
 
-	error(usageErrorMessage, 3)
+	return ErrorHandler.RaiseUsageError(usageErrorMessage)
 end
 
 
 return table.freeze(Validation)
-

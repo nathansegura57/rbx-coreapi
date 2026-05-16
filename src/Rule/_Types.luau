@@ -130,5 +130,5 @@ export type RuleModule = {
 	Schedule: ScheduleSet,
 }
 
-return nil
+return table.freeze({})
 

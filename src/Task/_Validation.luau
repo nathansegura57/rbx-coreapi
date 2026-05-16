@@ -1,9 +1,11 @@
 --!strict
 
+local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
+
 local Validation = {}
 
 function Validation.raiseUsageError(message: string): never
-	error(message, 3)
+	return ErrorHandler.RaiseUsageError(message)
 end
 
 function Validation.ensureValueIsFunction(value: unknown, message: string): ()
@@ -69,4 +71,3 @@ function Validation.ensureArrayIsNonEmptyDense(array: unknown, message: string):
 end
 
 return table.freeze(Validation)
-

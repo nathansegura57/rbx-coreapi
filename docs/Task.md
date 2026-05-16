@@ -371,34 +371,9 @@ Adds a task to the group. No-op if the task is already done. Returns `self`.
 
 ---
 
-#### `group:Start(fn, opts?)`
-
-Equivalent to `Task.Start(fn, opts)` followed by `group:Add(task)`. Returns the new task.
-
-**Errors:**
-- `Group.Start: group is destroyed`
-
----
-
 #### `group:CancelAll(reason?)`
 
 Cancels all pending tasks in the group. Default reason: `Task.Reason.ModeExit`.
-
----
-
-#### `group:JoinAll()`
-
-Returns a task that fulfills when all currently-pending tasks in the group have settled.
-
-**Returns:** `Task<nil>`
-
----
-
-#### `group:Race()`
-
-Returns a task that settles with the first pending task to settle. If the group is empty, returns an unresolvable pending task.
-
-**Returns:** `Task<any>`
 
 ---
 
@@ -661,7 +636,7 @@ end
 
 local group = Task.Group({ Name = "FetchGroup" })
 
-local t = group:Start(function(token)
+local t = Task.Start(function(token)
     local ok, data = fetchWithRetry("https://example.com/api"):Await(token)
     if not ok then
         warn("fetch failed:", data)
@@ -669,6 +644,7 @@ local t = group:Start(function(token)
     end
     print("got data:", data)
 end)
+group:Add(t)
 
 t:Finally(function(status)
     print("task finished with:", status)
@@ -679,3 +655,35 @@ Task.Delay(15, function()
     group:CancelAll("Shutdown")
 end)
 ```
+
+---
+
+## Planned APIs
+
+The following `TaskGroup` APIs are planned but not yet implemented:
+
+#### `group:Start(fn, opts?)`
+
+Equivalent to `Task.Start(fn, opts)` followed by `group:Add(task)`. Returns the new task.
+
+**Status:** Planned — use `Task.Start` followed by `group:Add` in the meantime.
+
+---
+
+#### `group:JoinAll()`
+
+Returns a task that fulfills when all currently-pending tasks in the group have settled.
+
+**Returns:** `Task<nil>`
+
+**Status:** Planned.
+
+---
+
+#### `group:Race()`
+
+Returns a task that settles with the first pending task to settle.
+
+**Returns:** `Task<any>`
+
+**Status:** Planned.

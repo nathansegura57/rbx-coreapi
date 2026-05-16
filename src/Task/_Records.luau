@@ -3,76 +3,20 @@
 local Connection = require(script.Parent.Parent.Connection)
 local ErrorHandler = require(script.Parent.Parent.ErrorHandler)
 local Scheduler = require(script.Parent.Parent.Scheduler)
+local Types = require(script.Parent._Types)
 local Validation = require(script.Parent._Validation)
 
-export type Status = "Pending" | "Fulfilled" | "Cancelled" | "Errored"
-export type CancellationReason = string
-export type Backoff = "Fixed" | "Expo"
+type Status = Types.Status
+type Token = Types.Token
+type Task<T> = Types.Task<T>
+type TaskGroup = Types.TaskGroup
+type TaskOptions = Types.TaskOptions
+type GroupOptions = Types.GroupOptions
+type TraceEvent = Types.TraceEvent
+type StatusSet = Types.StatusSet
+type ReasonSet = Types.ReasonSet
+type BackoffSet = Types.BackoffSet
 
-export type Token = {
-	Cancelled: (self: Token) -> boolean,
-	Reason: (self: Token) -> string?,
-	OnCancel: (self: Token, callback: (reason: string?) -> ()) -> Connection.Connection,
-}
-
-export type Task<T> = {
-	Token: (self: Task<T>) -> Token,
-	Cancel: (self: Task<T>, reason: string?) -> (),
-	Status: (self: Task<T>) -> Status,
-	IsPending: (self: Task<T>) -> boolean,
-	IsFulfilled: (self: Task<T>) -> boolean,
-	IsCancelled: (self: Task<T>) -> boolean,
-	IsErrored: (self: Task<T>) -> boolean,
-	IsDone: (self: Task<T>) -> boolean,
-	Finally: (self: Task<T>, callback: (status: Status, value: unknown?) -> ()) -> Task<T>,
-	Await: (self: Task<T>, token: Token?) -> (boolean, T | unknown),
-	Unwrap: (self: Task<T>, token: Token?) -> T,
-	Result: (self: Task<T>) -> (boolean, T?),
-	Error: (self: Task<T>) -> (boolean, unknown?),
-	Name: (self: Task<T>) -> string?,
-}
-
-export type TaskGroup = {
-	Add: (self: TaskGroup, task: Task<any>) -> TaskGroup,
-	Start: (self: TaskGroup, taskBody: (Token) -> any, options: TaskOptions?) -> Task<any>,
-	CancelAll: (self: TaskGroup, reason: string?) -> (),
-	JoinAll: (self: TaskGroup) -> Task<nil>,
-	Race: (self: TaskGroup) -> Task<any>,
-	Destroy: (self: TaskGroup, reason: string?) -> (),
-	Size: (self: TaskGroup) -> number,
-	Name: (self: TaskGroup) -> string?,
-}
-
-export type TaskOptions = { Name: string? }
-export type GroupOptions = { Name: string? }
-
-export type TraceEvent = {
-	Event: "Start" | "Done" | "Cancel" | "Error",
-	Name: string?,
-	Status: Status?,
-}
-
-export type StatusSet = {
-	Pending: "Pending",
-	Fulfilled: "Fulfilled",
-	Cancelled: "Cancelled",
-	Errored: "Errored",
-}
-
-export type ReasonSet = {
-	ModeExit: string,
-	GuardFalse: string,
-	Superseded: string,
-	Timeout: string,
-	User: string,
-	Shutdown: string,
-	Capacity: string,
-}
-
-export type BackoffSet = {
-	Fixed: "Fixed",
-	Expo: "Expo",
-}
 
 type FinallyCallback = (status: Status, value: unknown?) -> ()
 type CancellationCallback = (reason: string?) -> ()
@@ -100,6 +44,7 @@ export type GroupRecord = {
 	PendingTasks: { [Task<any>]: boolean },
 }
 
+
 local taskHandleMethods = {}
 local tokenHandleMethods = {}
 local groupHandleMethods = {}
@@ -114,16 +59,26 @@ local groupMetatable = table.freeze({ __index = groupHandleMethods, __metatable 
 
 local activeTracer: ((TraceEvent) -> ())? = nil
 
-local Runtime = {}
+local Records = {}
 
-Runtime.Status = (table.freeze({
-	Pending = "Pending",
-	Fulfilled = "Fulfilled",
-	Cancelled = "Cancelled",
-	Errored = "Errored",
-}) :: any) :: StatusSet
 
-Runtime.Reason = table.freeze({
+-- ── Enum ──────────────────────────────────────────────────────────────────────
+
+local pendingStatus: "Pending" = "Pending"
+local fulfilledStatus: "Fulfilled" = "Fulfilled"
+local cancelledStatus: "Cancelled" = "Cancelled"
+local erroredStatus: "Errored" = "Errored"
+
+local statusEnum: StatusSet = table.freeze({
+	Pending = pendingStatus,
+	Fulfilled = fulfilledStatus,
+	Cancelled = cancelledStatus,
+	Errored = erroredStatus,
+})
+
+Records.Status = statusEnum
+
+Records.Reason = table.freeze({
 	ModeExit = "ModeExit",
 	GuardFalse = "GuardFalse",
 	Superseded = "Superseded",
@@ -133,12 +88,20 @@ Runtime.Reason = table.freeze({
 	Capacity = "Capacity",
 }) :: ReasonSet
 
-Runtime.Backoff = (table.freeze({
-	Fixed = "Fixed",
-	Expo = "Expo",
-}) :: any) :: BackoffSet
+local fixedBackoff: "Fixed" = "Fixed"
+local expoBackoff: "Expo" = "Expo"
 
-function Runtime.SetTracer(tracer: ((TraceEvent) -> ())?): ()
+local backoffEnum: BackoffSet = table.freeze({
+	Fixed = fixedBackoff,
+	Expo = expoBackoff,
+})
+
+Records.Backoff = backoffEnum
+
+
+-- ── Tracer ────────────────────────────────────────────────────────────────────
+
+function Records.SetTracer(tracer: ((TraceEvent) -> ())?): ()
 	if tracer ~= nil and typeof(tracer) ~= "function" then
 		Validation.raiseUsageError("Task.SetTracer: tracer must be a function or nil")
 	end
@@ -146,7 +109,7 @@ function Runtime.SetTracer(tracer: ((TraceEvent) -> ())?): ()
 	activeTracer = tracer
 end
 
-function Runtime.EmitTrace(eventName: "Start" | "Done" | "Cancel" | "Error", taskRecord: TaskRecord): ()
+function Records.EmitTrace(eventName: "Start" | "Done" | "Cancel" | "Error", taskRecord: TaskRecord): ()
 	local tracer = activeTracer
 
 	if tracer == nil then
@@ -162,7 +125,10 @@ function Runtime.EmitTrace(eventName: "Start" | "Done" | "Cancel" | "Error", tas
 	end, "Task", "Tracer", taskRecord.Name)
 end
 
-function Runtime.CreateTokenRecord(): (Token, TokenRecord)
+
+-- ── Record creation ───────────────────────────────────────────────────────────
+
+function Records.CreateTokenRecord(): (Token, TokenRecord)
 	local token = setmetatable({}, tokenMetatable) :: any
 	local tokenRecord: TokenRecord = {
 		Cancelled = false,
@@ -175,11 +141,11 @@ function Runtime.CreateTokenRecord(): (Token, TokenRecord)
 	return token, tokenRecord
 end
 
-function Runtime.CreatePendingTaskRecord(name: string?): (Task<any>, TaskRecord)
-	local token, tokenRecord = Runtime.CreateTokenRecord()
+function Records.CreatePendingTaskRecord(name: string?): (Task<any>, TaskRecord)
+	local token, tokenRecord = Records.CreateTokenRecord()
 	local task = setmetatable({}, taskMetatable) :: any
 	local taskRecord: TaskRecord = {
-		Status = Runtime.Status.Pending,
+		Status = Records.Status.Pending,
 		Value = nil,
 		Error = nil,
 		Reason = nil,
@@ -190,12 +156,12 @@ function Runtime.CreatePendingTaskRecord(name: string?): (Task<any>, TaskRecord)
 	}
 
 	taskRecords[task] = taskRecord
-	Runtime.EmitTrace("Start", taskRecord)
+	Records.EmitTrace("Start", taskRecord)
 
 	return task, taskRecord
 end
 
-function Runtime.CreateGroupRecord(name: string?): (TaskGroup, GroupRecord)
+function Records.CreateGroupRecord(name: string?): (TaskGroup, GroupRecord)
 	local group = setmetatable({}, groupMetatable) :: any
 	local groupRecord: GroupRecord = {
 		Name = name,
@@ -208,19 +174,22 @@ function Runtime.CreateGroupRecord(name: string?): (TaskGroup, GroupRecord)
 	return group, groupRecord
 end
 
-function Runtime.ValueIsLiveTask(value: unknown): boolean
+
+-- ── Record lookup ─────────────────────────────────────────────────────────────
+
+function Records.ValueIsLiveTask(value: unknown): boolean
 	return taskRecords[value :: any] ~= nil
 end
 
-function Runtime.ValueIsLiveToken(value: unknown): boolean
+function Records.ValueIsLiveToken(value: unknown): boolean
 	return tokenRecords[value :: any] ~= nil
 end
 
-function Runtime.ValueIsLiveGroup(value: unknown): boolean
+function Records.ValueIsLiveGroup(value: unknown): boolean
 	return groupRecords[value :: any] ~= nil
 end
 
-function Runtime.GetTaskRecord(task: Task<any>, usageErrorMessage: string): TaskRecord
+function Records.GetTaskRecord(task: Task<any>, usageErrorMessage: string): TaskRecord
 	local taskRecord = taskRecords[task]
 
 	if taskRecord == nil then
@@ -230,7 +199,7 @@ function Runtime.GetTaskRecord(task: Task<any>, usageErrorMessage: string): Task
 	return taskRecord
 end
 
-function Runtime.GetTokenRecord(token: Token, usageErrorMessage: string): TokenRecord
+function Records.GetTokenRecord(token: Token, usageErrorMessage: string): TokenRecord
 	local tokenRecord = tokenRecords[token]
 
 	if tokenRecord == nil then
@@ -240,7 +209,7 @@ function Runtime.GetTokenRecord(token: Token, usageErrorMessage: string): TokenR
 	return tokenRecord
 end
 
-function Runtime.GetGroupRecord(group: TaskGroup, usageErrorMessage: string): GroupRecord
+function Records.GetGroupRecord(group: TaskGroup, usageErrorMessage: string): GroupRecord
 	local groupRecord = groupRecords[group]
 
 	if groupRecord == nil then
@@ -250,7 +219,10 @@ function Runtime.GetGroupRecord(group: TaskGroup, usageErrorMessage: string): Gr
 	return groupRecord
 end
 
-function Runtime.CancelToken(tokenRecord: TokenRecord, reason: string?): ()
+
+-- ── Task settlement ───────────────────────────────────────────────────────────
+
+function Records.CancelToken(tokenRecord: TokenRecord, reason: string?): ()
 	if tokenRecord.Cancelled then
 		return
 	end
@@ -270,37 +242,37 @@ function Runtime.CancelToken(tokenRecord: TokenRecord, reason: string?): ()
 	end
 end
 
-function Runtime.SettlePendingTask(taskRecord: TaskRecord, status: Status, value: unknown?): ()
-	if taskRecord.Status ~= Runtime.Status.Pending then
+function Records.SettlePendingTask(taskRecord: TaskRecord, status: Status, value: unknown?): ()
+	if taskRecord.Status ~= Records.Status.Pending then
 		return
 	end
 
 	taskRecord.Status = status
 
-	if status == Runtime.Status.Fulfilled then
+	if status == Records.Status.Fulfilled then
 		taskRecord.Value = value
-	elseif status == Runtime.Status.Cancelled then
+	elseif status == Records.Status.Cancelled then
 		taskRecord.Reason = value :: string?
-		Runtime.CancelToken(taskRecord.TokenRecord, taskRecord.Reason)
-	elseif status == Runtime.Status.Errored then
+		Records.CancelToken(taskRecord.TokenRecord, taskRecord.Reason)
+	elseif status == Records.Status.Errored then
 		taskRecord.Error = value
 	end
 
-	Runtime.EmitTrace(if status == Runtime.Status.Errored then "Error" elseif status == Runtime.Status.Cancelled then "Cancel" else "Done", taskRecord)
-	Runtime.ScheduleFinallyCallbacks(taskRecord)
+	Records.EmitTrace(if status == Records.Status.Errored then "Error" elseif status == Records.Status.Cancelled then "Cancel" else "Done", taskRecord)
+	Records.ScheduleFinallyCallbacks(taskRecord)
 end
 
-function Runtime.CancelTask(task: Task<any>, reason: string?): ()
-	local taskRecord = Runtime.GetTaskRecord(task, "Task.Cancel: invalid task handle")
-	Runtime.SettlePendingTask(taskRecord, Runtime.Status.Cancelled, reason or Runtime.Reason.User)
+function Records.CancelTask(task: Task<any>, reason: string?): ()
+	local taskRecord = Records.GetTaskRecord(task, "Task.Cancel: invalid task handle")
+	Records.SettlePendingTask(taskRecord, Records.Status.Cancelled, reason or Records.Reason.User)
 end
 
-function Runtime.ScheduleFinallyCallbacks(taskRecord: TaskRecord): ()
+function Records.ScheduleFinallyCallbacks(taskRecord: TaskRecord): ()
 	local callbacks = taskRecord.FinallyCallbacks
 	taskRecord.FinallyCallbacks = {}
 
 	local status = taskRecord.Status
-	local settledValue = if status == Runtime.Status.Fulfilled then taskRecord.Value elseif status == Runtime.Status.Errored then taskRecord.Error else taskRecord.Reason
+	local settledValue = if status == Records.Status.Fulfilled then taskRecord.Value elseif status == Records.Status.Errored then taskRecord.Error else taskRecord.Reason
 
 	for _, callback in callbacks do
 		Scheduler.Defer(function()
@@ -311,7 +283,22 @@ function Runtime.ScheduleFinallyCallbacks(taskRecord: TaskRecord): ()
 	end
 end
 
-function Runtime.ValidateTaskOptions(options: TaskOptions?, usagePrefix: string): string?
+function Records.ReadSettledTaskResult(taskRecord: TaskRecord): (boolean, any)
+	if taskRecord.Status == Records.Status.Fulfilled then
+		return true, taskRecord.Value
+	end
+
+	if taskRecord.Status == Records.Status.Errored then
+		return false, taskRecord.Error
+	end
+
+	return false, taskRecord.Reason
+end
+
+
+-- ── Option validation ─────────────────────────────────────────────────────────
+
+function Records.ValidateTaskOptions(options: TaskOptions?, usagePrefix: string): string?
 	Validation.ensureValueIsTableOrNil(options, `{usagePrefix}: opts must be a table or nil`)
 
 	if options == nil then
@@ -323,7 +310,7 @@ function Runtime.ValidateTaskOptions(options: TaskOptions?, usagePrefix: string)
 	return options.Name
 end
 
-function Runtime.ValidateGroupOptions(options: GroupOptions?, usagePrefix: string): string?
+function Records.ValidateGroupOptions(options: GroupOptions?, usagePrefix: string): string?
 	Validation.ensureValueIsTableOrNil(options, `{usagePrefix}: opts must be a table or nil`)
 
 	if options == nil then
@@ -334,49 +321,52 @@ function Runtime.ValidateGroupOptions(options: GroupOptions?, usagePrefix: strin
 
 	return options.Name
 end
+
+
+-- ── Task handle methods ───────────────────────────────────────────────────────
 
 function taskHandleMethods:Token(): Token
-	return Runtime.GetTaskRecord(self :: any, "Task.Token: invalid task handle").Token
+	return Records.GetTaskRecord(self :: any, "Task.Token: invalid task handle").Token
 end
 
 function taskHandleMethods:Cancel(reason: string?): ()
-	Runtime.CancelTask(self :: any, reason)
+	Records.CancelTask(self :: any, reason)
 end
 
 function taskHandleMethods:Status(): Status
-	return Runtime.GetTaskRecord(self :: any, "Task.Status: invalid task handle").Status
+	return Records.GetTaskRecord(self :: any, "Task.Status: invalid task handle").Status
 end
 
 function taskHandleMethods:IsPending(): boolean
-	return Runtime.GetTaskRecord(self :: any, "Task.IsPending: invalid task handle").Status == Runtime.Status.Pending
+	return Records.GetTaskRecord(self :: any, "Task.IsPending: invalid task handle").Status == Records.Status.Pending
 end
 
 function taskHandleMethods:IsFulfilled(): boolean
-	return Runtime.GetTaskRecord(self :: any, "Task.IsFulfilled: invalid task handle").Status == Runtime.Status.Fulfilled
+	return Records.GetTaskRecord(self :: any, "Task.IsFulfilled: invalid task handle").Status == Records.Status.Fulfilled
 end
 
 function taskHandleMethods:IsCancelled(): boolean
-	return Runtime.GetTaskRecord(self :: any, "Task.IsCancelled: invalid task handle").Status == Runtime.Status.Cancelled
+	return Records.GetTaskRecord(self :: any, "Task.IsCancelled: invalid task handle").Status == Records.Status.Cancelled
 end
 
 function taskHandleMethods:IsErrored(): boolean
-	return Runtime.GetTaskRecord(self :: any, "Task.IsErrored: invalid task handle").Status == Runtime.Status.Errored
+	return Records.GetTaskRecord(self :: any, "Task.IsErrored: invalid task handle").Status == Records.Status.Errored
 end
 
 function taskHandleMethods:IsDone(): boolean
-	return Runtime.GetTaskRecord(self :: any, "Task.IsDone: invalid task handle").Status ~= Runtime.Status.Pending
+	return Records.GetTaskRecord(self :: any, "Task.IsDone: invalid task handle").Status ~= Records.Status.Pending
 end
 
 function taskHandleMethods:Finally(callback: (status: Status, value: unknown?) -> ()): any
 	Validation.ensureValueIsFunction(callback, "Task.Finally: fn must be a function")
 
-	local taskRecord = Runtime.GetTaskRecord(self :: any, "Task.Finally: invalid task handle")
+	local taskRecord = Records.GetTaskRecord(self :: any, "Task.Finally: invalid task handle")
 
-	if taskRecord.Status == Runtime.Status.Pending then
+	if taskRecord.Status == Records.Status.Pending then
 		table.insert(taskRecord.FinallyCallbacks, callback)
 	else
 		local status = taskRecord.Status
-		local settledValue = if status == Runtime.Status.Fulfilled then taskRecord.Value elseif status == Runtime.Status.Errored then taskRecord.Error else taskRecord.Reason
+		local settledValue = if status == Records.Status.Fulfilled then taskRecord.Value elseif status == Records.Status.Errored then taskRecord.Error else taskRecord.Reason
 
 		Scheduler.Defer(function()
 			ErrorHandler.Protect(function()
@@ -389,14 +379,14 @@ function taskHandleMethods:Finally(callback: (status: Status, value: unknown?) -
 end
 
 function taskHandleMethods:Await(token: Token?): (boolean, any)
-	local taskRecord = Runtime.GetTaskRecord(self :: any, "Task.Await: invalid task handle")
+	local taskRecord = Records.GetTaskRecord(self :: any, "Task.Await: invalid task handle")
 
-	if token ~= nil and not Runtime.ValueIsLiveToken(token) then
+	if token ~= nil and not Records.ValueIsLiveToken(token) then
 		Validation.raiseUsageError("Task.Await: invalid token")
 	end
 
-	if taskRecord.Status ~= Runtime.Status.Pending then
-		return Runtime.ReadSettledTaskResult(taskRecord)
+	if taskRecord.Status ~= Records.Status.Pending then
+		return Records.ReadSettledTaskResult(taskRecord)
 	end
 
 	local runningCoroutine = coroutine.running()
@@ -423,7 +413,7 @@ function taskHandleMethods:Await(token: Token?): (boolean, any)
 	end
 
 	if token ~= nil then
-		local awaitTokenRecord = Runtime.GetTokenRecord(token, "Task.Await: invalid token")
+		local awaitTokenRecord = Records.GetTokenRecord(token, "Task.Await: invalid token")
 
 		if awaitTokenRecord.Cancelled then
 			return false, awaitTokenRecord.Reason
@@ -435,7 +425,7 @@ function taskHandleMethods:Await(token: Token?): (boolean, any)
 	end
 
 	self:Finally(function(status, value)
-		if status == Runtime.Status.Fulfilled then
+		if status == Records.Status.Fulfilled then
 			resumeAwait(true, value)
 		else
 			resumeAwait(false, value)
@@ -443,18 +433,6 @@ function taskHandleMethods:Await(token: Token?): (boolean, any)
 	end)
 
 	return coroutine.yield()
-end
-
-function Runtime.ReadSettledTaskResult(taskRecord: TaskRecord): (boolean, any)
-	if taskRecord.Status == Runtime.Status.Fulfilled then
-		return true, taskRecord.Value
-	end
-
-	if taskRecord.Status == Runtime.Status.Errored then
-		return false, taskRecord.Error
-	end
-
-	return false, taskRecord.Reason
 end
 
 function taskHandleMethods:Unwrap(token: Token?): any
@@ -468,9 +446,9 @@ function taskHandleMethods:Unwrap(token: Token?): any
 end
 
 function taskHandleMethods:Result(): (boolean, any)
-	local taskRecord = Runtime.GetTaskRecord(self :: any, "Task.Result: invalid task handle")
+	local taskRecord = Records.GetTaskRecord(self :: any, "Task.Result: invalid task handle")
 
-	if taskRecord.Status == Runtime.Status.Fulfilled then
+	if taskRecord.Status == Records.Status.Fulfilled then
 		return true, taskRecord.Value
 	end
 
@@ -478,9 +456,9 @@ function taskHandleMethods:Result(): (boolean, any)
 end
 
 function taskHandleMethods:Error(): (boolean, any)
-	local taskRecord = Runtime.GetTaskRecord(self :: any, "Task.Error: invalid task handle")
+	local taskRecord = Records.GetTaskRecord(self :: any, "Task.Error: invalid task handle")
 
-	if taskRecord.Status == Runtime.Status.Errored then
+	if taskRecord.Status == Records.Status.Errored then
 		return true, taskRecord.Error
 	end
 
@@ -488,21 +466,24 @@ function taskHandleMethods:Error(): (boolean, any)
 end
 
 function taskHandleMethods:Name(): string?
-	return Runtime.GetTaskRecord(self :: any, "Task.Name: invalid task handle").Name
+	return Records.GetTaskRecord(self :: any, "Task.Name: invalid task handle").Name
 end
 
+
+-- ── Token handle methods ──────────────────────────────────────────────────────
+
 function tokenHandleMethods:Cancelled(): boolean
-	return Runtime.GetTokenRecord(self :: any, "Token.Cancelled: invalid token handle").Cancelled
+	return Records.GetTokenRecord(self :: any, "Token.Cancelled: invalid token handle").Cancelled
 end
 
 function tokenHandleMethods:Reason(): string?
-	return Runtime.GetTokenRecord(self :: any, "Token.Reason: invalid token handle").Reason
+	return Records.GetTokenRecord(self :: any, "Token.Reason: invalid token handle").Reason
 end
 
 function tokenHandleMethods:OnCancel(callback: (reason: string?) -> ()): Connection.Connection
 	Validation.ensureValueIsFunction(callback, "Token.OnCancel: fn must be a function")
 
-	local tokenRecord = Runtime.GetTokenRecord(self :: any, "Token.OnCancel: invalid token handle")
+	local tokenRecord = Records.GetTokenRecord(self :: any, "Token.OnCancel: invalid token handle")
 
 	if tokenRecord.Cancelled then
 		Scheduler.Defer(function()
@@ -533,14 +514,17 @@ function tokenHandleMethods:OnCancel(callback: (reason: string?) -> ()): Connect
 	end)
 end
 
+
+-- ── Group handle methods ──────────────────────────────────────────────────────
+
 function groupHandleMethods:Add(task: Task<any>): any
-	local groupRecord = Runtime.GetGroupRecord(self :: any, "Group.Add: invalid group handle")
+	local groupRecord = Records.GetGroupRecord(self :: any, "Group.Add: invalid group handle")
 
 	if groupRecord.Destroyed then
 		Validation.raiseUsageError("Group.Add: group is destroyed")
 	end
 
-	if not Runtime.ValueIsLiveTask(task) then
+	if not Records.ValueIsLiveTask(task) then
 		Validation.raiseUsageError("Group.Add: invalid task handle")
 	end
 
@@ -555,8 +539,8 @@ function groupHandleMethods:Add(task: Task<any>): any
 end
 
 function groupHandleMethods:CancelAll(reason: string?): ()
-	local groupRecord = Runtime.GetGroupRecord(self :: any, "Group.CancelAll: invalid group handle")
-	local cancellationReason = reason or Runtime.Reason.ModeExit
+	local groupRecord = Records.GetGroupRecord(self :: any, "Group.CancelAll: invalid group handle")
+	local cancellationReason = reason or Records.Reason.ModeExit
 
 	for task in groupRecord.PendingTasks do
 		task:Cancel(cancellationReason)
@@ -564,19 +548,19 @@ function groupHandleMethods:CancelAll(reason: string?): ()
 end
 
 function groupHandleMethods:Destroy(reason: string?): ()
-	local groupRecord = Runtime.GetGroupRecord(self :: any, "Group.Destroy: invalid group handle")
+	local groupRecord = Records.GetGroupRecord(self :: any, "Group.Destroy: invalid group handle")
 
 	if groupRecord.Destroyed then
 		return
 	end
 
 	groupRecord.Destroyed = true
-	(self :: any):CancelAll(reason or Runtime.Reason.ModeExit)
+	;(self :: any):CancelAll(reason or Records.Reason.ModeExit)
 	table.clear(groupRecord.PendingTasks)
 end
 
 function groupHandleMethods:Size(): number
-	local groupRecord = Runtime.GetGroupRecord(self :: any, "Group.Size: invalid group handle")
+	local groupRecord = Records.GetGroupRecord(self :: any, "Group.Size: invalid group handle")
 	local size = 0
 
 	for _ in groupRecord.PendingTasks do
@@ -587,8 +571,8 @@ function groupHandleMethods:Size(): number
 end
 
 function groupHandleMethods:Name(): string?
-	return Runtime.GetGroupRecord(self :: any, "Group.Name: invalid group handle").Name
+	return Records.GetGroupRecord(self :: any, "Group.Name: invalid group handle").Name
 end
 
-return table.freeze(Runtime)
 
+return table.freeze(Records)
